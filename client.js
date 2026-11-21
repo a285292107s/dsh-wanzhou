@@ -57,6 +57,34 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
      */
     const THROUGH_GUARD_MS = 400
 
+    /**
+     * The lock is a preference, not a page-local mode: it lives in
+     * localStorage, so a new session page, a reload, or a second tab opens
+     * with the figure already ghosted instead of needing the lock again.
+     * Sessions are pages of the same origin, so the browser is the right
+     * scope; clearing site data brings back the default unlocked figure.
+     */
+    const LOCK_STORAGE_KEY = 'zzz-spine:locked'
+
+    function readStoredLock() {
+      try {
+        return window.localStorage.getItem(LOCK_STORAGE_KEY) === '1'
+      } catch {
+        // Storage can be unavailable (site data blocked, some private modes).
+        // Losing the preference is harmless: the figure starts unlocked.
+        return false
+      }
+    }
+
+    function writeStoredLock(locked) {
+      try {
+        if (locked) window.localStorage.setItem(LOCK_STORAGE_KEY, '1')
+        else window.localStorage.removeItem(LOCK_STORAGE_KEY)
+      } catch {
+        // Not remembered, but this page keeps the lock until it is reloaded.
+      }
+    }
+
     const dataCache = new Map()
 
     function fetchText(url) {
@@ -519,17 +547,19 @@ html.zzz-spine-pointer body {
     function Stage() {
       const canvasRef = React.useRef(null)
       const stageRef = React.useRef(null)
-      const fadedRef = React.useRef(false)
+      // A stored lock mounts straight into the ghost pose: the fade the lock
+      // implies must exist before the first paint, not after a press.
+      const [locked, setLocked] = React.useState(readStoredLock)
+      const [faded, setFaded] = React.useState(locked)
+      const fadedRef = React.useRef(locked)
       const syncRef = React.useRef(null)
       const [failed, setFailed] = React.useState(false)
-      const [faded, setFaded] = React.useState(false)
       const character = CHARACTER
       const hoveredRef = React.useRef(false)
-      const lockedRef = React.useRef(false)
+      const lockedRef = React.useRef(locked)
       const lockVisibleRef = React.useRef(false)
       const maskRef = React.useRef(null)
       const [hovered, setHovered] = React.useState(false)
-      const [locked, setLocked] = React.useState(false)
       const [lockVisible, setLockVisible] = React.useState(false)
 
       const setHover = React.useCallback((next) => {
@@ -557,10 +587,13 @@ html.zzz-spine-pointer body {
         setFadedState(!fadedRef.current)
       }, [setFadedState])
       const restore = React.useCallback(() => setFadedState(false), [setFadedState])
+      // Unlocking is a choice worth remembering too: leaving a session with
+      // the figure restored must not bring the ghost back on the next one.
       const unlock = React.useCallback(() => {
         lockedRef.current = false
         setLocked(false)
         setFadedState(false)
+        writeStoredLock(false)
       }, [setFadedState])
       const toggleLock = React.useCallback(() => {
         if (lockedRef.current) {
@@ -570,6 +603,7 @@ html.zzz-spine-pointer body {
         lockedRef.current = true
         setLocked(true)
         setFadedState(true)
+        writeStoredLock(true)
       }, [setFadedState, unlock])
       const activateFigure = React.useCallback(() => {
         if (lockedRef.current) {
@@ -578,6 +612,23 @@ html.zzz-spine-pointer body {
         }
         toggleFade()
       }, [toggleFade, unlock])
+
+      // Every page of the GUI in this browser shares the preference, so a tab
+      // that flips the lock tells the others through the `storage` event. The
+      // writer never receives its own event, so this cannot loop.
+      React.useEffect(() => {
+        const onStorage = (event) => {
+          if (event.key !== null && event.key !== LOCK_STORAGE_KEY) return
+          // `key === null` means clear(): re-read whatever survived.
+          const next = event.key === null ? readStoredLock() : event.newValue === '1'
+          if (lockedRef.current === next) return
+          lockedRef.current = next
+          setLocked(next)
+          setFadedState(next)
+        }
+        window.addEventListener('storage', onStorage)
+        return () => window.removeEventListener('storage', onStorage)
+      }, [setFadedState])
       React.useEffect(() => {
         let disposed = false
         let rig = null

@@ -11,6 +11,19 @@ const FILE = path.join(ROOT, 'client.js')
 const code = fs.readFileSync(FILE, 'utf8')
 
 const node = (type, props, children) => ({ type, props: props ?? {}, children })
+
+/** Depth-first search for a rendered node by one of its class names. */
+const findNode = (node, className) => {
+  if (node === null || typeof node !== 'object') return null
+  const name = node.props?.className
+  if (typeof name === 'string' && name.split(' ').includes(className)) return node
+  for (const child of node.children ?? []) {
+    const found = findNode(child, className)
+    if (found !== null) return found
+  }
+  return null
+}
+
 const React = {
   createElement: (type, props, ...children) => node(type, props, children.flat()),
   Fragment: Symbol('Fragment'),
@@ -20,6 +33,10 @@ const React = {
   useCallback: (fn) => fn,
 }
 
+// Stands in for the page's localStorage: the lock preference is the one key
+// the bundle reads and writes.
+const storage = new Map()
+
 let registration = null
 const sandbox = {
   window: {
@@ -28,7 +45,11 @@ const sandbox = {
         registration = entry
       },
     },
-    localStorage: { getItem: () => null, setItem: () => {} },
+    localStorage: {
+      getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+      setItem: (key, value) => storage.set(key, String(value)),
+      removeItem: (key) => storage.delete(key),
+    },
     devicePixelRatio: 1,
     requestAnimationFrame: () => 0,
     cancelAnimationFrame: () => {},
@@ -127,3 +148,24 @@ console.log('ok: hover lock rendered, old chip gone')
 console.log('ok: overlay metadata', JSON.stringify(overlay.meta))
 console.log('ok: rendered children', children.length, '(style + stage)')
 console.log('ok: click-through stylesheet present')
+
+// A new session page must not reset the lock: the preference is read on mount
+// and written whenever the lock toggles.
+storage.clear()
+const plainTree = stageElement.type(stageElement.props)
+const plainMarkup = JSON.stringify(plainTree)
+if (plainMarkup.includes('data-locked')) throw new Error('a page without a stored lock must start unlocked')
+
+storage.set('zzz-spine:locked', '1')
+const lockedMarkup = JSON.stringify(stageElement.type(stageElement.props))
+if (!lockedMarkup.includes('data-locked')) throw new Error('a stored lock was not restored on mount')
+if (!lockedMarkup.includes('data-faded')) throw new Error('a restored lock must mount as the ghost pose')
+
+storage.clear()
+const lockButton = findNode(plainTree, 'zzz-spine-lock')
+if (lockButton === null) throw new Error('lock button node is missing')
+lockButton.props.onClick()
+if (storage.get('zzz-spine:locked') !== '1') throw new Error('locking was not persisted')
+lockButton.props.onClick()
+if (storage.has('zzz-spine:locked')) throw new Error('unlocking did not clear the persisted lock')
+console.log('ok: lock preference restored on mount and persisted on toggle')
