@@ -104,6 +104,6 @@ npm test        # 冒烟测试：确认产物能求值、槽位注册正确
 
 ## 许可
 
-- 代码：MIT，见 [`LICENSE`](LICENSE)。
-- 美术资源：版权归米哈游 / HoYoverse，不在 MIT 范围内，见开头声明。
-- Spine 运行时：© Esoteric Software LLC，遵循 [`vendor/SPINE-RUNTIMES-LICENSE.txt`](vendor/SPINE-RUNTIMES-LICENSE.txt)。
+- **代码**：MIT，见 [`LICENSE`](LICENSE)。该许可证只覆盖代码；`assets/` 下的美术资源和 `docs/images/` 里的截图不在其内。
+- **美术资源**：版权归米哈游 / HoYoverse，见开头声明。
+- **Spine 运行时**：© Esoteric Software LLC，是独立的第三方作品，遵循 [`vendor/SPINE-RUNTIMES-LICENSE.txt`](vendor/SPINE-RUNTIMES-LICENSE.txt)，同样不在 MIT 范围内。

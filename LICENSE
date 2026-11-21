@@ -19,11 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This license covers the source code only. It does not cover the artwork under
-`assets/` or the screenshots under `docs/images/`, whose copyright belongs to
-miHoYo / HoYoverse; see the notice at the top of README.md. The bundled Spine
-runtime under `vendor/` is a separate work under the Spine Runtimes License
-(`vendor/SPINE-RUNTIMES-LICENSE.txt`).
