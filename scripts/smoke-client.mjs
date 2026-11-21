@@ -111,10 +111,19 @@ if (children.length !== 2) throw new Error('expected style + stage, got ' + chil
 
 const css = children[0]?.children?.[0]
 if (typeof css !== 'string') throw new Error('style sheet was not emitted as a string')
-for (const rule of ['zzz-spine-restore', 'zzz-spine-pointer', '[data-hover] canvas']) {
+for (const rule of ['zzz-spine-lock', 'data-lock-visible', 'zzz-spine-pointer', '[data-hover] canvas']) {
   if (!css.includes(rule)) throw new Error('style sheet is missing ' + rule)
 }
 
+const stageElement = children[1]
+if (stageElement === undefined || typeof stageElement.type !== 'function') {
+  throw new Error('stage component is missing')
+}
+const stageMarkup = JSON.stringify(stageElement.type(stageElement.props))
+if (!stageMarkup.includes('zzz-spine-lock')) throw new Error('lock button is not rendered')
+if (stageMarkup.includes('zzz-spine-restore')) throw new Error('old restore chip is still rendered')
+if (!stageMarkup.includes('锁定为点击穿透')) throw new Error('lock label is missing')
+console.log('ok: hover lock rendered, old chip gone')
 console.log('ok: overlay metadata', JSON.stringify(overlay.meta))
 console.log('ok: rendered children', children.length, '(style + stage)')
 console.log('ok: click-through stylesheet present')

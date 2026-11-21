@@ -1,6 +1,6 @@
 {
   "name": "@local/zzz-spine",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "绝区零立绘挂件：输入框右上角的 Spine 角色（可点击穿透），以及「深度求索中」文案的改写和前面旋转的小黄花。",

@@ -382,15 +382,16 @@ window.__ModuleLoader__.load({
   filter: drop-shadow(0 10px 20px rgba(0, 0, 0, 0.5));
 }
 /* Faded: the figure is a ghost and the stage lets every press through, so
-   even controls behind the painted body can be used. The corner chip is the
-   one part of the stage that stays clickable. */
+   even controls behind the painted body can be used. */
 .zzz-spine-stage[data-faded] .zzz-spine-hit canvas {
   opacity: 0.12;
   filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.12));
 }
-/* The way back from click-through. The stage is pointer-events: none while
-   faded, but a descendant can opt back into hit testing. */
-.zzz-spine-restore {
+/* Lock control. It stays in the DOM so it can be reached from the keyboard,
+   but it only becomes visible while the pointer is on the figure (or the
+   button itself is focused). Locking keeps the ghost and the click-through
+   in place until it is unlocked again. */
+.zzz-spine-lock {
   position: absolute;
   top: 2px;
   left: 2px;
@@ -406,22 +407,37 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-bg-module-platform, rgba(30, 30, 30, 0.78));
   color: var(--dsw-alias-label-secondary, #c8c8c8);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
-  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(-2px) scale(0.96);
+  pointer-events: none;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition: opacity 140ms ease, transform 140ms ease, color 140ms ease, border-color 140ms ease;
 }
-.zzz-spine-restore:hover {
+.zzz-spine-stage[data-lock-visible] .zzz-spine-lock,
+.zzz-spine-lock:focus-visible {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+.zzz-spine-lock:hover,
+.zzz-spine-lock:focus-visible {
   color: var(--dsw-alias-label-primary, #ffffff);
   border-color: var(--dsw-alias-border-focus, rgba(120, 170, 255, 0.6));
 }
-.zzz-spine-restore:focus-visible {
+.zzz-spine-stage[data-locked] .zzz-spine-lock {
+  color: var(--dsw-alias-label-primary, #ffffff);
+  border-color: var(--dsw-alias-border-focus, rgba(120, 170, 255, 0.65));
+  background: rgba(76, 141, 255, 0.22);
+}
+.zzz-spine-lock:focus-visible {
   outline: 2px solid var(--dsw-alias-border-focus, #4c8dff);
   outline-offset: 2px;
 }
 
 /* Fingers need a bigger target than a mouse pointer. */
 @media (pointer: coarse) {
-  .zzz-spine-restore {
+  .zzz-spine-lock {
     width: 32px;
     height: 32px;
   }
@@ -505,8 +521,12 @@ html.zzz-spine-pointer body {
       const [faded, setFaded] = React.useState(false)
       const character = CHARACTER
       const hoveredRef = React.useRef(false)
+      const lockedRef = React.useRef(false)
+      const lockVisibleRef = React.useRef(false)
       const maskRef = React.useRef(null)
       const [hovered, setHovered] = React.useState(false)
+      const [locked, setLocked] = React.useState(false)
+      const [lockVisible, setLockVisible] = React.useState(false)
 
       const setHover = React.useCallback((next) => {
         if (hoveredRef.current === next) return
@@ -514,8 +534,14 @@ html.zzz-spine-pointer body {
         setHovered(next)
       }, [])
 
-      // Fade actions only touch refs and state, so the pointer router, the
-      // keyboard path and the restore chip can share them across renders.
+      const setLockShown = React.useCallback((next) => {
+        if (lockVisibleRef.current === next) return
+        lockVisibleRef.current = next
+        setLockVisible(next)
+      }, [])
+
+      // Fade and lock actions only touch refs and state, so the pointer router,
+      // the keyboard path and the lock control can share them across renders.
       const setFadedState = React.useCallback((next) => {
         if (fadedRef.current === next) return
         fadedRef.current = next
@@ -527,6 +553,28 @@ html.zzz-spine-pointer body {
         setFadedState(!fadedRef.current)
       }, [setFadedState])
       const restore = React.useCallback(() => setFadedState(false), [setFadedState])
+      const unlock = React.useCallback(() => {
+        lockedRef.current = false
+        setLocked(false)
+        setFadedState(false)
+      }, [setFadedState])
+      const toggleLock = React.useCallback(() => {
+        if (lockedRef.current) {
+          unlock()
+          return
+        }
+        lockedRef.current = true
+        setLocked(true)
+        setLockShown(true)
+        setFadedState(true)
+      }, [setFadedState, setLockShown, unlock])
+      const activateFigure = React.useCallback(() => {
+        if (lockedRef.current) {
+          unlock()
+          return
+        }
+        toggleFade()
+      }, [toggleFade, unlock])
       React.useEffect(() => {
         let disposed = false
         let rig = null
@@ -755,6 +803,29 @@ html.zzz-spine-pointer body {
           return mask.cells[row * mask.width + column] === 1
         }
 
+        let flashTimer = 0
+
+        const fromLockButton = (event) => event.target instanceof Element &&
+          event.target.closest('.zzz-spine-lock') !== null
+
+        const clearFlash = () => {
+          if (flashTimer !== 0) {
+            window.clearTimeout(flashTimer)
+            flashTimer = 0
+          }
+        }
+
+        // Touch has no hover, so a tap reveals the lock for a few seconds
+        // instead of leaving it on screen for good.
+        const flashLock = () => {
+          setLockShown(true)
+          clearFlash()
+          flashTimer = window.setTimeout(() => {
+            flashTimer = 0
+            setLockShown(false)
+          }, 4000)
+        }
+
         /**
          * Menus and the queue strip can paint above the figure while the
          * figure's box covers the same point. `elementsFromPoint` skips a
@@ -799,17 +870,24 @@ html.zzz-spine-pointer body {
           // Only a primary press belongs to the figure; right-click and
           // middle-click stay with the page (context menu, autoscroll).
           if (event.button !== 0) return
-          if (event.target instanceof Element && event.target.closest('.zzz-spine-restore') !== null) return
+          // The lock is the one control inside the stage that must always
+          // receive its own press, even while the stage is click-through.
+          if (fromLockButton(event)) return
           const x = event.clientX
           const y = event.clientY
 
           if (fadedRef.current) {
-            // Faded is click-through. Pressing outside the stage is the easy
-            // way back; presses inside it go to the page unchanged, so a row
-            // of controls behind the figure can be used one after another.
-            if (!isInsideStage(x, y)) {
+            // Faded is click-through. Pressing outside the stage restores an
+            // unlocked figure; presses inside it go to the page unchanged, so
+            // controls behind the figure can be used one after another.
+            const inside = isInsideStage(x, y)
+            if (!lockedRef.current && !inside) {
+              setLockShown(false)
               restore()
-            } else if (performance.now() < guardUntil) {
+              return
+            }
+            if (event.pointerType !== 'mouse' && (lockedRef.current || inside)) flashLock()
+            if (inside && performance.now() < guardUntil) {
               // The second click of a double click would otherwise land on the
               // control the fade just revealed.
               event.preventDefault()
@@ -825,24 +903,35 @@ html.zzz-spine-pointer body {
           arm()
           guardUntil = performance.now() + THROUGH_GUARD_MS
           toggleFade()
+          if (event.pointerType !== 'mouse') flashLock()
         }
 
         const onPointerMove = (event) => {
           if (event.pointerType === 'touch') return
-          if (fadedRef.current) {
-            setHover(false)
-            return
+          // A moving mouse owns the hover state; drop any touch flash timer.
+          if (flashTimer !== 0) {
+            window.clearTimeout(flashTimer)
+            flashTimer = 0
           }
-          setHover(hitsFigure(event.clientX, event.clientY))
+          const x = event.clientX
+          const y = event.clientY
+          const inside = isInsideStage(x, y)
+          const hit = hitsFigure(x, y)
+          // Once shown, the lock stays visible while the pointer is anywhere in
+          // the stage, so moving from the body to the button does not make it
+          // disappear on the way.
+          setLockShown(hit || fromLockButton(event) || (lockVisibleRef.current && inside))
+          setHover(!fadedRef.current && hit)
         }
 
-        const onLeave = () => setHover(false)
-
-        const fromRestoreChip = (event) => event.target instanceof Element &&
-          event.target.closest('.zzz-spine-restore') !== null
+        const onLeave = () => {
+          setHover(false)
+          setLockShown(false)
+          clearFlash()
+        }
 
         const swallow = (event) => {
-          if (!armed || fromRestoreChip(event)) return
+          if (!armed || fromLockButton(event)) return
           if (!isInsideStage(event.clientX, event.clientY)) return
           event.preventDefault()
           event.stopPropagation()
@@ -850,9 +939,9 @@ html.zzz-spine-pointer body {
 
         const onClick = (event) => {
           if (!armed) return
-          // The restore chip is the one control that must always work, even if
-          // a press from just before is still being swallowed.
-          if (fromRestoreChip(event)) {
+          // The lock is the one control that must always work, even if a press
+          // from just before is still being swallowed.
+          if (fromLockButton(event)) {
             disarm()
             return
           }
@@ -879,7 +968,7 @@ html.zzz-spine-pointer body {
           const active = document.activeElement
           if (active !== stage && !stage.contains(active)) return
           event.stopPropagation()
-          restore()
+          unlock()
         }
 
         // Capture on the window: a press has to be routed before the page's
@@ -904,9 +993,10 @@ html.zzz-spine-pointer body {
           window.removeEventListener('blur', onLeave)
           document.removeEventListener('visibilitychange', onLeave)
           document.removeEventListener('keydown', onKeyDown, true)
+          clearFlash()
           disarm()
         }
-      }, [restore, setHover, toggleFade])
+      }, [restore, setHover, setLockShown, toggleFade, unlock])
 
       // A pointer cursor over the painted figure without giving the stage any
       // hit area of its own. Descendants with their own cursor still win.
@@ -918,18 +1008,22 @@ html.zzz-spine-pointer body {
       }, [hovered])
 
       // No tooltip: a popover on the figure hides the very thing a click is
-      // meant to reveal. The chip is icon-only and the figure's state lives in
+      // meant to reveal. The lock is icon-only; the figure's state lives in
       // its accessible name for keyboard and screen-reader users.
       const label = failed
         ? '立绘素材加载失败'
         : faded
-          ? `${character.name}，点击穿透中，点击页面别处或左上角按钮恢复`
+          ? locked
+            ? `${character.name}，已锁定点击穿透，悬停角色可解锁`
+            : `${character.name}，点击穿透中，点击页面别处可恢复`
           : `${character.name}，点击变透明并让出点击`
       return h('div', {
         ref: stageRef,
         className: 'zzz-spine-stage',
         'data-faded': faded ? '' : undefined,
         'data-hover': hovered ? '' : undefined,
+        'data-locked': locked ? '' : undefined,
+        'data-lock-visible': lockVisible ? '' : undefined,
       },
         h('div', { className: 'zzz-spine-glow', 'aria-hidden': true }),
         h('button', {
@@ -937,13 +1031,14 @@ html.zzz-spine-pointer body {
           className: 'zzz-spine-hit',
           'aria-label': label,
           'aria-pressed': faded,
-          onClick: toggleFade,
+          onClick: activateFigure,
         }, h('canvas', { ref: canvasRef, 'aria-hidden': true })),
-        faded ? h('button', {
+        h('button', {
           type: 'button',
-          className: 'zzz-spine-restore',
-          'aria-label': '恢复立绘',
-          onClick: restore,
+          className: 'zzz-spine-lock',
+          'aria-label': locked ? '取消锁定，恢复立绘' : '锁定为点击穿透',
+          'aria-pressed': locked,
+          onClick: toggleLock,
         }, h('svg', {
           viewBox: '0 0 16 16',
           width: 14,
@@ -951,21 +1046,25 @@ html.zzz-spine-pointer body {
           'aria-hidden': true,
           focusable: 'false',
         },
-        h('path', {
-          d: 'M1.5 8S4 3.9 8 3.9 14.5 8 14.5 8 12 12.1 8 12.1 1.5 8 1.5 8Z',
+        h('rect', {
+          x: 3.5,
+          y: 7,
+          width: 9,
+          height: 6.5,
+          rx: 1.5,
           fill: 'none',
           stroke: 'currentColor',
           strokeWidth: 1.3,
-          strokeLinejoin: 'round',
         }),
-        h('circle', {
-          cx: 8,
-          cy: 8,
-          r: 2.1,
+        h('path', {
+          d: locked
+            ? 'M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7'
+            : 'M5.5 7V5.2a2.5 2.5 0 0 1 4.7-1.2',
           fill: 'none',
           stroke: 'currentColor',
           strokeWidth: 1.3,
-        }))) : null,
+          strokeLinecap: 'round',
+        }))),
       )
     }
 
