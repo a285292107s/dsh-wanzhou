@@ -1,0 +1,7 @@
+# Build output for the source map, if one is ever produced.
+client.js.map
+
+# OS noise.
+Thumbs.db
+desktop.ini
+.DS_Store

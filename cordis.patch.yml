@@ -1,0 +1,3 @@
+- insert:
+    - id: zzz-spine
+      name: '@local/zzz-spine'
