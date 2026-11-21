@@ -2,8 +2,9 @@
  * Client half of the "绝区零 · 立绘" decoration.
  *
  * One piece rides the composer: an animated Spine figure standing on the
- * input card's top-right corner. Clicking it fades the figure out so whatever
- * it covers can be inspected.
+ * input card's top-right corner. Pressing the painted figure fades it to a
+ * ghost and lets clicks through to whatever it covers; the empty corners of
+ * the 180×240 stage never catch a press in the first place.
  *
  * `client.js` is generated from this file by `_extract/build-client.mjs`,
  * which substitutes the runtime placeholder with the bundled Spine runtime.
@@ -35,6 +36,22 @@ window.__ModuleLoader__.load({
      */
     const FRAME_INTERVAL = 1000 / 20
 
+    /**
+     * The corner stage is mostly empty, so the pointer router tests the
+     * figure's painted pixels instead of letting the whole rectangle swallow
+     * presses. The mask is a coarse 45×60 alpha grid — 4×4 CSS px per cell —
+     * rebuilt from the canvas every eighth painted frame (400 ms at 20 Hz).
+     */
+    const MASK_WIDTH = 45
+    const MASK_HEIGHT = 60
+    const MASK_THRESHOLD = 64
+    const MASK_FRAMES = 8
+    /**
+     * A press on the figure is followed by a click the router has to swallow;
+     * this window is also held after fading so the second click of a double
+     * click cannot land on whatever the figure was covering.
+     */
+    const THROUGH_GUARD_MS = 400
 
     const dataCache = new Map()
 
@@ -339,8 +356,9 @@ window.__ModuleLoader__.load({
   background: transparent;
   color: inherit;
   font: inherit;
-  pointer-events: auto;
-  cursor: pointer;
+  /* The stage ignores pointer events; a document-level router decides
+     whether a press landed on the painted figure. */
+  pointer-events: none;
   border-radius: 12px;
   -webkit-tap-highlight-color: transparent;
 }
@@ -357,20 +375,63 @@ window.__ModuleLoader__.load({
   filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.45));
   transition: transform 200ms ease, filter 200ms ease, opacity 220ms ease;
 }
-.zzz-spine-hit:hover canvas {
+/* The pointer router sets data-hover only over painted pixels. The lift is
+   cosmetic; hit testing keeps using the untransformed stage box. */
+.zzz-spine-stage[data-hover] canvas {
   transform: translateY(-2px) scale(1.015);
   filter: drop-shadow(0 10px 20px rgba(0, 0, 0, 0.5));
 }
-/* Clicked: the figure turns into a ghost so whatever it covers — conversation
-   text, the queue strip — can be inspected; clicking again brings it back. */
+/* Faded: the figure is a ghost and the stage lets every press through, so
+   even controls behind the painted body can be used. The corner chip is the
+   one part of the stage that stays clickable. */
 .zzz-spine-stage[data-faded] .zzz-spine-hit canvas {
   opacity: 0.12;
   filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.12));
 }
-.zzz-spine-stage[data-faded] .zzz-spine-hit:hover canvas {
-  transform: none;
-  opacity: 0.35;
-  filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.2));
+/* The way back from click-through. The stage is pointer-events: none while
+   faded, but a descendant can opt back into hit testing. */
+.zzz-spine-restore {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.16));
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-module-platform, rgba(30, 30, 30, 0.78));
+  color: var(--dsw-alias-label-secondary, #c8c8c8);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.zzz-spine-restore:hover {
+  color: var(--dsw-alias-label-primary, #ffffff);
+  border-color: var(--dsw-alias-border-focus, rgba(120, 170, 255, 0.6));
+}
+.zzz-spine-restore:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-focus, #4c8dff);
+  outline-offset: 2px;
+}
+
+/* Fingers need a bigger target than a mouse pointer. */
+@media (pointer: coarse) {
+  .zzz-spine-restore {
+    width: 32px;
+    height: 32px;
+  }
+}
+
+/* Only painted pixels are clickable, so the stage keeps its default cursor;
+   the router marks the hovered <html> while the pointer is over the figure. */
+html.zzz-spine-pointer,
+html.zzz-spine-pointer body {
+  cursor: pointer;
 }
 .zzz-spine-glow {
   position: absolute;
@@ -443,7 +504,29 @@ window.__ModuleLoader__.load({
       const [failed, setFailed] = React.useState(false)
       const [faded, setFaded] = React.useState(false)
       const character = CHARACTER
+      const hoveredRef = React.useRef(false)
+      const maskRef = React.useRef(null)
+      const [hovered, setHovered] = React.useState(false)
 
+      const setHover = React.useCallback((next) => {
+        if (hoveredRef.current === next) return
+        hoveredRef.current = next
+        setHovered(next)
+      }, [])
+
+      // Fade actions only touch refs and state, so the pointer router, the
+      // keyboard path and the restore chip can share them across renders.
+      const setFadedState = React.useCallback((next) => {
+        if (fadedRef.current === next) return
+        fadedRef.current = next
+        setFaded(next)
+        setHover(false)
+        if (syncRef.current !== null) syncRef.current()
+      }, [setHover])
+      const toggleFade = React.useCallback(() => {
+        setFadedState(!fadedRef.current)
+      }, [setFadedState])
+      const restore = React.useCallback(() => setFadedState(false), [setFadedState])
       React.useEffect(() => {
         let disposed = false
         let rig = null
@@ -561,6 +644,32 @@ window.__ModuleLoader__.load({
             }
           }
 
+          // The hit mask is rebuilt from what was just painted: downsample the
+          // backing store to 45×60, read its alpha, and keep one bit per cell.
+          // Starting at MASK_FRAMES - 1 makes the first paint below refresh it.
+          const maskCanvas = document.createElement('canvas')
+          maskCanvas.width = MASK_WIDTH
+          maskCanvas.height = MASK_HEIGHT
+          const maskContext = maskCanvas.getContext('2d', { willReadFrequently: true })
+          const cells = new Uint8Array(MASK_WIDTH * MASK_HEIGHT)
+          let maskFrame = MASK_FRAMES - 1
+
+          const refreshMask = () => {
+            if (maskContext === null) return
+            try {
+              maskContext.clearRect(0, 0, MASK_WIDTH, MASK_HEIGHT)
+              maskContext.drawImage(canvas, 0, 0, MASK_WIDTH, MASK_HEIGHT)
+              const pixels = maskContext.getImageData(0, 0, MASK_WIDTH, MASK_HEIGHT).data
+              for (let cell = 0; cell < cells.length; cell++) {
+                cells[cell] = pixels[cell * 4 + 3] >= MASK_THRESHOLD ? 1 : 0
+              }
+              maskRef.current = { width: MASK_WIDTH, height: MASK_HEIGHT, cells }
+            } catch {
+              // A tainted canvas cannot be read. Without a mask every press
+              // falls through, which is better than blocking the page.
+              maskRef.current = null
+            }
+          }
           const paint = (delta) => {
             context.setTransform(1, 0, 0, 1, 0, 0)
             context.clearRect(0, 0, canvas.width, canvas.height)
@@ -573,9 +682,20 @@ window.__ModuleLoader__.load({
             state.apply(skeleton)
             skeleton.updateWorldTransform(spine.Physics.update)
             renderer.draw(skeleton)
+            if (++maskFrame >= MASK_FRAMES) {
+              maskFrame = 0
+              refreshMask()
+            }
           }
 
-          rig = { paint, resize: resizeCanvas }
+          rig = {
+            paint,
+            resize: () => {
+              resizeCanvas()
+              // Force the paint that follows to rebuild the mask at the new size.
+              maskFrame = MASK_FRAMES - 1
+            },
+          }
           resizeCanvas()
           // Paint one frame synchronously: a background tab never runs
           // requestAnimationFrame, and the stage must not look empty then.
@@ -596,30 +716,220 @@ window.__ModuleLoader__.load({
             motion.removeEventListener('change', onMotionChange)
           }
           syncRef.current = null
+          maskRef.current = null
           rig = null
         }
       }, [character.dir])
 
-      // Clicking fades the figure so whatever it covers can be read; a frozen
-      // pose is enough there, so the loop stops instead of ghosting a moving
-      // figure at 12% opacity.
-      const toggleFade = () => {
-        const next = !fadedRef.current
-        fadedRef.current = next
-        setFaded(next)
-        if (syncRef.current !== null) syncRef.current()
-      }
+      /**
+       * Pointer routing. The stage and its hit layer are pointer-events: none,
+       * so a press only belongs to the figure when this router says it landed
+       * on a painted pixel and the figure is what is painted there. Everything
+       * else — the empty corners of the stage, the page under a faded figure —
+       * keeps its normal target.
+       */
+      React.useEffect(() => {
+        const stage = stageRef.current
+        if (stage === null) return undefined
 
-      // Tooltips and the corner label are deliberately gone: a popover on the
-      // figure hides the very thing a click is meant to reveal. The accessible
-      // name keeps the state announcement for keyboard and screen-reader users.
+        let armed = false
+        let guardUntil = 0
+        let timer = 0
+
+        const isInsideStage = (x, y) => {
+          const rect = stage.getBoundingClientRect()
+          return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+        }
+
+        const hitsFigure = (x, y) => {
+          const mask = maskRef.current
+          if (mask === null) return false
+          // The stage, not the canvas: a hover lift moves the canvas visually,
+          // and the hit area must not move with it or the pointer flickers at
+          // the silhouette's edge.
+          const rect = stage.getBoundingClientRect()
+          if (rect.width === 0 || rect.height === 0) return false
+          if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return false
+          const column = Math.min(mask.width - 1, Math.floor(((x - rect.left) / rect.width) * mask.width))
+          const row = Math.min(mask.height - 1, Math.floor(((y - rect.top) / rect.height) * mask.height))
+          return mask.cells[row * mask.width + column] === 1
+        }
+
+        /**
+         * Menus and the queue strip can paint above the figure while the
+         * figure's box covers the same point. `elementsFromPoint` skips a
+         * pointer-events: none stage, so switch it on for the query and look
+         * at what is painted in front of it.
+         */
+        const figureIsTopmost = (x, y) => {
+          if (typeof document.elementsFromPoint !== 'function') return true
+          const previous = stage.style.pointerEvents
+          stage.style.pointerEvents = 'auto'
+          let stack
+          try {
+            stack = document.elementsFromPoint(x, y)
+          } finally {
+            stage.style.pointerEvents = previous
+          }
+          const index = stack.indexOf(stage)
+          if (index < 0) return false
+          for (let position = 0; position < index; position++) {
+            if (!stage.contains(stack[position])) return false
+          }
+          return true
+        }
+
+        const disarm = () => {
+          armed = false
+          if (timer !== 0) {
+            window.clearTimeout(timer)
+            timer = 0
+          }
+        }
+
+        const arm = () => {
+          armed = true
+          if (timer !== 0) window.clearTimeout(timer)
+          // A press that never becomes a click (drag, cancel) must not keep
+          // swallowing the next click elsewhere on the page.
+          timer = window.setTimeout(disarm, 1000)
+        }
+
+        const onPointerDown = (event) => {
+          // Only a primary press belongs to the figure; right-click and
+          // middle-click stay with the page (context menu, autoscroll).
+          if (event.button !== 0) return
+          if (event.target instanceof Element && event.target.closest('.zzz-spine-restore') !== null) return
+          const x = event.clientX
+          const y = event.clientY
+
+          if (fadedRef.current) {
+            // Faded is click-through. Pressing outside the stage is the easy
+            // way back; presses inside it go to the page unchanged, so a row
+            // of controls behind the figure can be used one after another.
+            if (!isInsideStage(x, y)) {
+              restore()
+            } else if (performance.now() < guardUntil) {
+              // The second click of a double click would otherwise land on the
+              // control the fade just revealed.
+              event.preventDefault()
+              event.stopPropagation()
+              arm()
+            }
+            return
+          }
+
+          if (!hitsFigure(x, y) || !figureIsTopmost(x, y)) return
+          event.preventDefault()
+          event.stopPropagation()
+          arm()
+          guardUntil = performance.now() + THROUGH_GUARD_MS
+          toggleFade()
+        }
+
+        const onPointerMove = (event) => {
+          if (event.pointerType === 'touch') return
+          if (fadedRef.current) {
+            setHover(false)
+            return
+          }
+          setHover(hitsFigure(event.clientX, event.clientY))
+        }
+
+        const onLeave = () => setHover(false)
+
+        const fromRestoreChip = (event) => event.target instanceof Element &&
+          event.target.closest('.zzz-spine-restore') !== null
+
+        const swallow = (event) => {
+          if (!armed || fromRestoreChip(event)) return
+          if (!isInsideStage(event.clientX, event.clientY)) return
+          event.preventDefault()
+          event.stopPropagation()
+        }
+
+        const onClick = (event) => {
+          if (!armed) return
+          // The restore chip is the one control that must always work, even if
+          // a press from just before is still being swallowed.
+          if (fromRestoreChip(event)) {
+            disarm()
+            return
+          }
+          // Keyboard activation has no pointer press behind it; never eat it.
+          if (event.detail === 0) {
+            disarm()
+            return
+          }
+          if (!isInsideStage(event.clientX, event.clientY)) {
+            disarm()
+            return
+          }
+          disarm()
+          event.preventDefault()
+          event.stopPropagation()
+        }
+
+        const onPointerCancel = () => {
+          if (armed) disarm()
+        }
+
+        const onKeyDown = (event) => {
+          if (event.key !== 'Escape' || !fadedRef.current) return
+          const active = document.activeElement
+          if (active !== stage && !stage.contains(active)) return
+          event.stopPropagation()
+          restore()
+        }
+
+        // Capture on the window: a press has to be routed before the page's
+        // own handlers or the target's default action can see it.
+        window.addEventListener('pointerdown', onPointerDown, true)
+        window.addEventListener('pointermove', onPointerMove, { capture: true, passive: true })
+        window.addEventListener('mousedown', swallow, true)
+        window.addEventListener('mouseup', swallow, true)
+        window.addEventListener('click', onClick, true)
+        window.addEventListener('pointercancel', onPointerCancel, true)
+        window.addEventListener('blur', onLeave)
+        document.addEventListener('visibilitychange', onLeave)
+        document.addEventListener('keydown', onKeyDown, true)
+
+        return () => {
+          window.removeEventListener('pointerdown', onPointerDown, true)
+          window.removeEventListener('pointermove', onPointerMove, true)
+          window.removeEventListener('mousedown', swallow, true)
+          window.removeEventListener('mouseup', swallow, true)
+          window.removeEventListener('click', onClick, true)
+          window.removeEventListener('pointercancel', onPointerCancel, true)
+          window.removeEventListener('blur', onLeave)
+          document.removeEventListener('visibilitychange', onLeave)
+          document.removeEventListener('keydown', onKeyDown, true)
+          disarm()
+        }
+      }, [restore, setHover, toggleFade])
+
+      // A pointer cursor over the painted figure without giving the stage any
+      // hit area of its own. Descendants with their own cursor still win.
+      React.useEffect(() => {
+        if (!hovered) return undefined
+        const root = document.documentElement
+        root.classList.add('zzz-spine-pointer')
+        return () => root.classList.remove('zzz-spine-pointer')
+      }, [hovered])
+
+      // No tooltip: a popover on the figure hides the very thing a click is
+      // meant to reveal. The chip is icon-only and the figure's state lives in
+      // its accessible name for keyboard and screen-reader users.
       const label = failed
         ? '立绘素材加载失败'
-        : faded ? `${character.name}，已变透明，点击恢复` : `${character.name}，点击变透明`
+        : faded
+          ? `${character.name}，点击穿透中，点击页面别处或左上角按钮恢复`
+          : `${character.name}，点击变透明并让出点击`
       return h('div', {
         ref: stageRef,
         className: 'zzz-spine-stage',
         'data-faded': faded ? '' : undefined,
+        'data-hover': hovered ? '' : undefined,
       },
         h('div', { className: 'zzz-spine-glow', 'aria-hidden': true }),
         h('button', {
@@ -629,6 +939,33 @@ window.__ModuleLoader__.load({
           'aria-pressed': faded,
           onClick: toggleFade,
         }, h('canvas', { ref: canvasRef, 'aria-hidden': true })),
+        faded ? h('button', {
+          type: 'button',
+          className: 'zzz-spine-restore',
+          'aria-label': '恢复立绘',
+          onClick: restore,
+        }, h('svg', {
+          viewBox: '0 0 16 16',
+          width: 14,
+          height: 14,
+          'aria-hidden': true,
+          focusable: 'false',
+        },
+        h('path', {
+          d: 'M1.5 8S4 3.9 8 3.9 14.5 8 14.5 8 12 12.1 8 12.1 1.5 8 1.5 8Z',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.3,
+          strokeLinejoin: 'round',
+        }),
+        h('circle', {
+          cx: 8,
+          cy: 8,
+          r: 2.1,
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.3,
+        }))) : null,
       )
     }
 

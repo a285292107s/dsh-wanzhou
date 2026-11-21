@@ -109,5 +109,12 @@ if (classes.includes('zzz-kv')) throw new Error('backdrop is still rendered')
 if (!classes.includes('zzz-spine-stage')) throw new Error('stage is missing')
 if (children.length !== 2) throw new Error('expected style + stage, got ' + children.length)
 
+const css = children[0]?.children?.[0]
+if (typeof css !== 'string') throw new Error('style sheet was not emitted as a string')
+for (const rule of ['zzz-spine-restore', 'zzz-spine-pointer', '[data-hover] canvas']) {
+  if (!css.includes(rule)) throw new Error('style sheet is missing ' + rule)
+}
+
 console.log('ok: overlay metadata', JSON.stringify(overlay.meta))
 console.log('ok: rendered children', children.length, '(style + stage)')
+console.log('ok: click-through stylesheet present')
