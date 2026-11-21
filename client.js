@@ -440,7 +440,7 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
 }
 
 /* Fingers need a bigger target than a mouse pointer. */
-@media (pointer: coarse) {
+@media (any-pointer: coarse) {
   .zzz-spine-lock {
     width: 32px;
     height: 32px;
@@ -569,9 +569,8 @@ html.zzz-spine-pointer body {
         }
         lockedRef.current = true
         setLocked(true)
-        setLockShown(true)
         setFadedState(true)
-      }, [setFadedState, setLockShown, unlock])
+      }, [setFadedState, unlock])
       const activateFigure = React.useCallback(() => {
         if (lockedRef.current) {
           unlock()
@@ -788,24 +787,23 @@ html.zzz-spine-pointer body {
         let guardUntil = 0
         let timer = 0
 
-        const isInsideStage = (x, y) => {
-          const rect = stage.getBoundingClientRect()
-          return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
-        }
+        const isInside = (rect, x, y) =>
+          x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
 
-        const hitsFigure = (x, y) => {
+        // The stage, not the canvas: a hover lift moves the canvas visually,
+        // and the hit area must not move with it or the pointer flickers at
+        // the silhouette's edge.
+        const hitsFigure = (rect, x, y) => {
           const mask = maskRef.current
           if (mask === null) return false
-          // The stage, not the canvas: a hover lift moves the canvas visually,
-          // and the hit area must not move with it or the pointer flickers at
-          // the silhouette's edge.
-          const rect = stage.getBoundingClientRect()
           if (rect.width === 0 || rect.height === 0) return false
-          if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return false
+          if (!isInside(rect, x, y)) return false
           const column = Math.min(mask.width - 1, Math.floor(((x - rect.left) / rect.width) * mask.width))
           const row = Math.min(mask.height - 1, Math.floor(((y - rect.top) / rect.height) * mask.height))
           return mask.cells[row * mask.width + column] === 1
         }
+
+        const isInsideStage = (x, y) => isInside(stage.getBoundingClientRect(), x, y)
 
         let flashTimer = 0
 
@@ -874,17 +872,20 @@ html.zzz-spine-pointer body {
           // Only a primary press belongs to the figure; right-click and
           // middle-click stay with the page (context menu, autoscroll).
           if (event.button !== 0) return
+          // A new press owns whatever click follows it; a press that was
+          // dragged away must not swallow this one.
+          disarm()
           // The lock is the one control inside the stage that must always
           // receive its own press, even while the stage is click-through.
           if (fromLockButton(event)) return
           const x = event.clientX
           const y = event.clientY
-
+          const rect = stage.getBoundingClientRect()
           if (fadedRef.current) {
             // Faded is click-through. Pressing outside the stage restores an
             // unlocked figure; presses inside it go to the page unchanged, so
             // controls behind the figure can be used one after another.
-            const inside = isInsideStage(x, y)
+            const inside = isInside(rect, x, y)
             if (!lockedRef.current && !inside) {
               setLockShown(false)
               restore()
@@ -901,7 +902,7 @@ html.zzz-spine-pointer body {
             return
           }
 
-          if (!hitsFigure(x, y) || !figureIsTopmost(x, y)) return
+          if (!hitsFigure(rect, x, y) || !figureIsTopmost(x, y)) return
           event.preventDefault()
           event.stopPropagation()
           arm()
@@ -919,8 +920,9 @@ html.zzz-spine-pointer body {
           }
           const x = event.clientX
           const y = event.clientY
-          const inside = isInsideStage(x, y)
-          const hit = hitsFigure(x, y)
+          const rect = stage.getBoundingClientRect()
+          const inside = isInside(rect, x, y)
+          const hit = hitsFigure(rect, x, y)
           // Once shown, the lock stays visible while the pointer is anywhere in
           // the stage, so moving from the body to the button does not make it
           // disappear on the way.
@@ -1018,8 +1020,8 @@ html.zzz-spine-pointer body {
         ? '立绘素材加载失败'
         : faded
           ? locked
-            ? `${character.name}，已锁定点击穿透，悬停角色可解锁`
-            : `${character.name}，点击穿透中，点击页面别处可恢复`
+            ? `${character.name}，已锁定点击穿透，按 Enter 解锁`
+            : `${character.name}，点击穿透中，按 Enter 或点页面别处恢复`
           : `${character.name}，点击变透明并让出点击`
       return h('div', {
         ref: stageRef,
