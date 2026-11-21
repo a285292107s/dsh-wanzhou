@@ -1,5 +1,7 @@
 # 绝区零 · 立绘挂件
 
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
 DeepSeek Harness 的 Web 界面装饰：输入框右上角站着《绝区零》的德蕾琪娜·挽昼（这套皮肤叫「柔光之影」），运行中的「罗塞塔数据解算中」前面转着一朵小黄花。三张截图都是本机实拍。
 
 > **版权与免责声明**
@@ -107,7 +109,3 @@ npm test        # 冒烟测试：确认产物能求值、槽位注册正确
 - **代码**：MIT，见 [`LICENSE`](LICENSE)。该许可证只覆盖代码；`assets/` 下的美术资源和 `docs/images/` 里的截图不在其内。
 - **美术资源**：版权归米哈游 / HoYoverse，见开头声明。
 - **Spine 运行时**：© Esoteric Software LLC，是独立的第三方作品，遵循 [`vendor/SPINE-RUNTIMES-LICENSE.txt`](vendor/SPINE-RUNTIMES-LICENSE.txt)，同样不在 MIT 范围内。
-
----
-
-[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
