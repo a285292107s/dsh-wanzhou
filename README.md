@@ -41,7 +41,7 @@ DeepSeek Harness 的 Web 界面装饰：输入框右上角站着《绝区零》�
 git clone https://github.com/a285292107s/dsh-wanzhou.git
 ```
 
-在 DSH 的 profile（默认 `~/.dsh/profiles/web`）里把它接上，两种写法选一种：
+在 DSH 的 profile（默认 `~/.dsh/profiles/web`）里接上它。依赖写法二选一：
 
 **从 GitHub 装**（只想用）
 
@@ -65,9 +65,9 @@ git clone https://github.com/a285292107s/dsh-wanzhou.git
 
 把上面的依赖值换成 `"link:C:/path/to/dsh-wanzhou"` 即可，改完源码不用重新安装。
 
-两种方式都要**重启 `dsh web`** 才生效（宿主端注册了路由，不能热更）。
+两种方式都要**重启 `dsh web`**，新装的插件才会被加载。
 
-如果不想动 `bundles`，也可以只加一条 loader patch：
+不想动 `bundles` 的话，改在 profile 的 patch 里插一行，二选一即可：
 
 ```yaml
 # ~/.dsh/profiles/web/cordis.patch.yml（不是仓库里那个同名文件）
@@ -85,7 +85,9 @@ git clone https://github.com/a285292107s/dsh-wanzhou.git
 ├── index.js              # 宿主端：把素材以同源 URL 发给页面
 ├── client.js             # 浏览器端产物：立绘 + 小黄花
 ├── client.template.js    # 上面那个的源码
+├── package.json          # 包清单：声明 bundle patch 与浏览器端入口
 ├── cordis.patch.yml      # 包自带的装载声明，列进 bundles 时自动生效
+├── LICENSE               # MIT，只覆盖代码
 ├── assets/               # 立绘与花朵素材（版权见开头）
 ├── vendor/               # Spine 运行时及其许可证
 ├── scripts/              # 构建与冒烟测试
