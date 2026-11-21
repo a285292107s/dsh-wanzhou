@@ -39,19 +39,25 @@ function resolveAsset(pathname) {
   return resolved
 }
 
-async function respond(pathname) {
-  const file = resolveAsset(pathname)
+async function respond(request) {
+  const file = resolveAsset(new URL(request.url).pathname)
   if (file === undefined) return new Response('not found', { status: 404 })
   const info = await stat(file).catch(() => undefined)
   if (info === undefined || !info.isFile()) return new Response('not found', { status: 404 })
+  // Revalidate on every load rather than guessing a freshness window: a rebuilt
+  // atlas or texture has to take effect on the next reload, and a 304 on the
+  // local carrier costs one round trip instead of the whole file.
+  const etag = `"${info.size.toString(16)}-${Math.trunc(info.mtimeMs).toString(16)}"`
+  const headers = {
+    'content-type': MEDIA_TYPES[path.extname(file).toLowerCase()] ?? 'application/octet-stream',
+    'cache-control': 'no-cache',
+    'x-content-type-options': 'nosniff',
+    etag,
+  }
+  if (request.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers })
   const body = await readFile(file)
   return new Response(body, {
-    headers: {
-      'content-type': MEDIA_TYPES[path.extname(file).toLowerCase()] ?? 'application/octet-stream',
-      'content-length': String(body.byteLength),
-      'cache-control': 'public, max-age=86400',
-      'x-content-type-options': 'nosniff',
-    },
+    headers: { ...headers, 'content-length': String(body.byteLength) },
   })
 }
 
@@ -59,6 +65,6 @@ export function apply(ctx) {
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: ROUTE,
-    resource: (request) => respond(new URL(request.url).pathname),
+    resource: (request) => respond(request),
   }))
 }

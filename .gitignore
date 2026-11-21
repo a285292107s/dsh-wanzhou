@@ -1,6 +1,9 @@
 # Build output for the source map, if one is ever produced.
 client.js.map
 
+# Dependencies, if this package is ever npm-installed rather than linked.
+node_modules/
+
 # OS noise.
 Thumbs.db
 desktop.ini

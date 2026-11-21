@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "ZZZ character stage",
-    "description": "Adds the event card's lead character (柔光之影) as an animated Spine figure on the composer's top-right corner (click to fade it out and inspect what it covers), and swaps the whale tail in the running Deep-diving indicator for the event page's spinning little yellow flower.",
+    "description": "Adds the event card's lead character 德蕾琪娜·挽昼 (wearing the 柔光之影 outfit) as an animated Spine figure on the composer's top-right corner (click to fade it out and inspect what it covers), and swaps the whale tail in the running Deep-diving indicator for the event page's spinning little yellow flower.",
     "detail": "docs/DETAIL.md"
   }
 }

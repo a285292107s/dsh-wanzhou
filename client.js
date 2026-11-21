@@ -25,14 +25,27 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
     const STAGE_WIDTH = 180
     const STAGE_HEIGHT = 240
     const GROUND_MARGIN = 4
-    /** The event card's lead figure; the only one this decoration uses. */
-    const CHARACTER = { dir: 'levels_spine_a', name: '柔光之影' }
+    /**
+     * The event card's lead figure. 德蕾琪娜·挽昼 is the character; 柔光之影 is
+     * only the name of the outfit the event shows her in.
+     */
+    const CHARACTER = { dir: 'levels_spine_a', name: '德蕾琪娜·挽昼' }
+    /**
+     * Presentation cadence for the figure. The idle loop's meshes move about
+     * 0.16 device pixels per 1/60 s, so a 60 Hz repaint draws 59 near-identical
+     * frames a second for ~13 ms of Canvas2D time each — the whole frame budget
+     * of the page. At 20 Hz one step is 0.24 CSS px, still sub-pixel motion for
+     * an eye that only sees the 3.3 s loop, for a third of the work.
+     */
+    const FRAME_INTERVAL = 1000 / 20
 
 
     const dataCache = new Map()
 
     function fetchText(url) {
-      return fetch(url, { cache: 'force-cache' }).then((response) => {
+      // No `force-cache`: the host answers with an ETag and a 304, so a rebuilt
+      // atlas is picked up without re-downloading unchanged bytes.
+      return fetch(url).then((response) => {
         if (!response.ok) throw new Error(`assets ${response.status}: ${url}`)
         return response.text()
       })
@@ -42,23 +55,29 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
       return fetchText(url).then((text) => JSON.parse(text))
     }
 
-    function loadImage(url) {
-      return new Promise((resolve, reject) => {
+    /**
+     * Decode a texture page without blocking a frame. `Image` finishes decoding
+     * on the first `drawImage`, i.e. inside a paint; `createImageBitmap` decodes
+     * up front off the main thread, which is why the first frame no longer costs
+     * the ~33 ms an <img> decode did.
+     */
+    async function loadTexture(url) {
+      if (typeof createImageBitmap === 'function') {
+        try {
+          const response = await fetch(url)
+          if (!response.ok) throw new Error(`texture ${response.status}: ${url}`)
+          return await createImageBitmap(await response.blob())
+        } catch {
+          // Fall through to the element path; both are accepted by CanvasTexture.
+        }
+      }
+      return await new Promise((resolve, reject) => {
         const image = new Image()
         image.decoding = 'async'
         image.onload = () => resolve(image)
         image.onerror = () => reject(new Error(`texture failed: ${url}`))
         image.src = url
       })
-    }
-
-    /** Page headers of a Spine atlas: a bare `*.png` line followed by `size:`. */
-    function atlasPages(atlasText) {
-      const pages = []
-      const pattern = /^(\S+\.png)\s*\r?\n\s*size:\s*[0-9]+\s*,\s*[0-9]+/gm
-      let match
-      while ((match = pattern.exec(atlasText))) pages.push(match[1])
-      return pages
     }
 
     /** World-space bounds of the visible attachments at three idle poses. */
@@ -155,26 +174,27 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
         fetchJson(new URL(dir + '.json', dirUrl).href),
       ])
       const atlas = new spine.TextureAtlas(atlasText)
-      const pages = atlasPages(atlasText)
+      // The atlas text already names its pages; re-parsing it would be a second,
+      // more brittle copy of that truth.
+      const pages = atlas.pages.map((page) => page.name)
       await Promise.all(pages.map(async (page) => {
-        const image = await loadImage(new URL(page, dirUrl).href)
+        const texture = await loadTexture(new URL(page, dirUrl).href)
         for (const atlasPage of atlas.pages) {
-          if (atlasPage.name === page) atlasPage.setTexture(new spine.CanvasTexture(image))
+          if (atlasPage.name === page) atlasPage.setTexture(new spine.CanvasTexture(texture))
         }
       }))
       const skeletonData = new spine.SkeletonJson(new spine.AtlasAttachmentLoader(atlas))
         .readSkeletonData(json)
       const names = skeletonData.animations.map((animation) => animation.name)
       const animation = names.includes('idle') ? 'idle' : names[0]
-      const bounds = measure(skeletonData, animation)
       return {
         skeletonData,
         animation,
-        bounds,
         // The editor's setup bounds frame the card art the way the event page
-        // shows it; the vertex union can include off-stage props, so it is
-        // only the fallback for skeletons without declared bounds.
-        fit: framing(declaredBox(skeletonData) ?? bounds),
+        // shows it; the vertex union can include off-stage props, so it is only
+        // the fallback for skeletons without declared bounds — and it is only
+        // measured when that fallback is actually needed (7.5 ms otherwise).
+        fit: framing(declaredBox(skeletonData) ?? measure(skeletonData, animation)),
       }
     }
 
@@ -187,7 +207,98 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
      * reproduced: the event engine also wobbled the bone on x and pulsed its
      * scale, but those read as jitter at icon size and are left out.
      * ------------------------------------------------------------------- */
+    /* ---------------------------------------------------------------------
+     * Running-turn label
+     *
+     * Chat renders the running row's wording from its own locale table
+     * (`chat.deepDivingFor`), and a plugin cannot override it: the locale
+     * service throws when a namespace already has a dictionary for that
+     * locale. So the wording is rewritten in the DOM instead. Every rewrite
+     * happens inside a MutationObserver callback, which runs as a microtask
+     * before the browser paints, so React re-rendering the duration once a
+     * second never flashes the old text.
+     * ------------------------------------------------------------------- */
 
+    const RUNNING_LABEL = { from: '深度求索中', to: '罗塞塔数据解算中' }
+    const SHIMMER_TEXT = 'data-shimmer-text'
+
+    /** Rewrite every copy of the label inside one running row. */
+    function relabel(root) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        const value = node.nodeValue
+        if (value === null || !value.includes(RUNNING_LABEL.from)) continue
+        node.nodeValue = value.split(RUNNING_LABEL.from).join(RUNNING_LABEL.to)
+      }
+      // The shimmer overlay paints its sweep from this attribute, not from text,
+      // so it has to be carried along or the highlight shows the old wording.
+      for (const element of root.querySelectorAll(`[${SHIMMER_TEXT}]`)) {
+        const value = element.getAttribute(SHIMMER_TEXT)
+        if (value === null || !value.includes(RUNNING_LABEL.from)) continue
+        element.setAttribute(SHIMMER_TEXT, value.split(RUNNING_LABEL.from).join(RUNNING_LABEL.to))
+      }
+    }
+
+    /**
+     * Follow every `[data-chat-running]` row in the document. The row mounts
+     * once per Turn, so the document observer only carries the childList edge;
+     * the per-row observer carries the text and attribute churn.
+     */
+    function watchRunningLabel() {
+      const RUNNING = '[data-chat-running]'
+      // One observer per row, tracked so teardown can stop all of them. A row
+      // that leaves the document never mutates again, so its observer has to be
+      // pruned from here — the per-row callback would never fire to clean up,
+      // and this list would otherwise keep every finished row's DOM alive.
+      const tracked = []
+      const attached = new WeakMap()
+
+      const prune = () => {
+        for (let index = tracked.length - 1; index >= 0; index--) {
+          const entry = tracked[index]
+          if (entry.root.isConnected) continue
+          entry.observer.disconnect()
+          attached.delete(entry.root)
+          tracked.splice(index, 1)
+        }
+      }
+
+      const attach = (root) => {
+        if (attached.has(root)) return
+        relabel(root)
+        const observer = new MutationObserver(() => relabel(root))
+        observer.observe(root, {
+          characterData: true,
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: [SHIMMER_TEXT],
+        })
+        attached.set(root, observer)
+        tracked.push({ root, observer })
+      }
+
+      for (const root of document.querySelectorAll(RUNNING)) attach(root)
+
+      const rows = new MutationObserver((records) => {
+        prune()
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            if (node.nodeType !== Node.ELEMENT_NODE) continue
+            if (node.matches(RUNNING)) attach(node)
+            const inner = node.querySelector(RUNNING)
+            if (inner !== null) attach(inner)
+          }
+        }
+      })
+      rows.observe(document.body, { childList: true, subtree: true })
+
+      return () => {
+        rows.disconnect()
+        for (const entry of tracked) entry.observer.disconnect()
+        tracked.length = 0
+      }
+    }
     function loadCharacter(dir) {
       if (!dataCache.has(dir)) {
         dataCache.set(dir, build(dir).catch((error) => {
@@ -317,18 +428,101 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
 
     function Stage() {
       const canvasRef = React.useRef(null)
+      const stageRef = React.useRef(null)
+      const fadedRef = React.useRef(false)
+      const syncRef = React.useRef(null)
       const [failed, setFailed] = React.useState(false)
       const [faded, setFaded] = React.useState(false)
       const character = CHARACTER
 
       React.useEffect(() => {
         let disposed = false
+        let rig = null
         let frame = 0
+        let drawn = 0
+        let intersecting = true
+        let pageVisible = document.visibilityState !== 'hidden'
+
+        const motion = typeof window.matchMedia === 'function'
+          ? window.matchMedia('(prefers-reduced-motion: reduce)')
+          : null
+        const canvas = canvasRef.current
+        const stage = stageRef.current
+
+        /**
+         * A frame is only owed to a figure the viewer can actually see moving,
+         * on the active tab, not faded out, and not under a reduced-motion
+         * preference. Everything else is charge for nothing.
+         */
+        const shouldRun = () => rig !== null &&
+          !(motion !== null && motion.matches) &&
+          pageVisible && intersecting && !fadedRef.current
+
+        const tick = (now) => {
+          frame = 0
+          if (disposed || !shouldRun()) return
+          // Measured against the last painted frame instead of an accumulator:
+          // an accumulator drifts into the wrong multiple of the interval when
+          // 60 Hz steps sum to just under the threshold in floating point.
+          if (now - drawn >= FRAME_INTERVAL - 1) {
+            // Clamp so a stall or a hidden tab resumes smoothly instead of
+            // jumping a quarter second into the loop.
+            rig.paint(Math.min(0.1, (now - drawn) / 1000))
+            drawn = now
+          }
+          frame = window.requestAnimationFrame(tick)
+        }
+
+        const sync = () => {
+          if (disposed) return
+          if (shouldRun()) {
+            if (frame === 0) {
+              drawn = performance.now()
+              frame = window.requestAnimationFrame(tick)
+            }
+            return
+          }
+          if (frame !== 0) {
+            window.cancelAnimationFrame(frame)
+            frame = 0
+          }
+          // Freezing must not blank the stage: repaint the held pose once.
+          if (rig !== null) rig.paint(0)
+        }
+        syncRef.current = sync
+
+        const visibility = typeof IntersectionObserver === 'function'
+          ? new IntersectionObserver((entries) => {
+            const entry = entries[entries.length - 1]
+            intersecting = entry === undefined ? true : entry.isIntersecting
+            sync()
+          })
+          : null
+        if (visibility !== null && stage !== null) visibility.observe(stage)
+
+        const resize = typeof ResizeObserver === 'function'
+          ? new ResizeObserver(() => {
+            if (rig === null) return
+            rig.resize()
+            rig.paint(0)
+          })
+          : null
+        if (resize !== null && canvas !== null) resize.observe(canvas)
+
+        const onPageVisibility = () => {
+          pageVisible = document.visibilityState !== 'hidden'
+          sync()
+        }
+        const onMotionChange = () => sync()
+        document.addEventListener('visibilitychange', onPageVisibility)
+        if (motion !== null && motion.addEventListener !== undefined) {
+          motion.addEventListener('change', onMotionChange)
+        }
+
         setFailed(false)
         loadCharacter(character.dir).then((data) => {
           if (disposed) return
-          const canvas = canvasRef.current
-          if (!canvas) return
+          if (canvas === null) return
           const skeleton = new spine.Skeleton(data.skeletonData)
           const skin = pickSkin(skeleton, data.skeletonData)
           if (skin !== null) skeleton.setSkinByName(skin)
@@ -343,45 +537,69 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
           const renderer = new spine.SkeletonRenderer(context)
           renderer.triangleRendering = true
           const fit = data.fit
-          // Paint one frame synchronously: a background tab never runs
-          // requestAnimationFrame, and the stage must not look empty then.
-          const paint = (delta) => {
-            const dpr = Math.min(window.devicePixelRatio || 1, 2)
-            const width = canvas.clientWidth || STAGE_WIDTH
-            const height = canvas.clientHeight || STAGE_HEIGHT
-            if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
-              canvas.width = Math.round(width * dpr)
-              canvas.height = Math.round(height * dpr)
+          let pixelRatio = 1
+
+          // The backing store follows the CSS box. Reading `clientWidth` inside
+          // the loop would force a layout on every frame; a ResizeObserver is
+          // the one place that has to know instead.
+          const resizeCanvas = () => {
+            pixelRatio = Math.min(window.devicePixelRatio || 1, 2)
+            const width = Math.round((canvas.clientWidth || STAGE_WIDTH) * pixelRatio)
+            const height = Math.round((canvas.clientHeight || STAGE_HEIGHT) * pixelRatio)
+            if (canvas.width !== width || canvas.height !== height) {
+              canvas.width = width
+              canvas.height = height
             }
+          }
+
+          const paint = (delta) => {
             context.setTransform(1, 0, 0, 1, 0, 0)
             context.clearRect(0, 0, canvas.width, canvas.height)
             if (fit === null) return
             context.setTransform(
-              fit.a * dpr, 0, 0, -fit.a * dpr,
-              fit.e * dpr, fit.f * dpr,
+              fit.a * pixelRatio, 0, 0, -fit.a * pixelRatio,
+              fit.e * pixelRatio, fit.f * pixelRatio,
             )
             state.update(delta)
             state.apply(skeleton)
             skeleton.updateWorldTransform(spine.Physics.update)
             renderer.draw(skeleton)
           }
+
+          rig = { paint, resize: resizeCanvas }
+          resizeCanvas()
+          // Paint one frame synchronously: a background tab never runs
+          // requestAnimationFrame, and the stage must not look empty then.
           paint(0.2)
-          let previous = performance.now()
-          const draw = (now) => {
-            const delta = Math.min(0.05, (now - previous) / 1000)
-            previous = now
-            paint(delta)
-            frame = window.requestAnimationFrame(draw)
-          }
-          frame = window.requestAnimationFrame(draw)
+          sync()
         }).catch(() => {
           if (!disposed) setFailed(true)
         })
+
         return () => {
           disposed = true
           if (frame) window.cancelAnimationFrame(frame)
+          frame = 0
+          if (visibility !== null) visibility.disconnect()
+          if (resize !== null) resize.disconnect()
+          document.removeEventListener('visibilitychange', onPageVisibility)
+          if (motion !== null && motion.removeEventListener !== undefined) {
+            motion.removeEventListener('change', onMotionChange)
+          }
+          syncRef.current = null
+          rig = null
         }
       }, [character.dir])
+
+      // Clicking fades the figure so whatever it covers can be read; a frozen
+      // pose is enough there, so the loop stops instead of ghosting a moving
+      // figure at 12% opacity.
+      const toggleFade = () => {
+        const next = !fadedRef.current
+        fadedRef.current = next
+        setFaded(next)
+        if (syncRef.current !== null) syncRef.current()
+      }
 
       // Tooltips and the corner label are deliberately gone: a popover on the
       // figure hides the very thing a click is meant to reveal. The accessible
@@ -390,6 +608,7 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
         ? '立绘素材加载失败'
         : faded ? `${character.name}，已变透明，点击恢复` : `${character.name}，点击变透明`
       return h('div', {
+        ref: stageRef,
         className: 'zzz-spine-stage',
         'data-faded': faded ? '' : undefined,
       },
@@ -399,7 +618,7 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
           className: 'zzz-spine-hit',
           'aria-label': label,
           'aria-pressed': faded,
-          onClick: () => setFaded((value) => !value),
+          onClick: toggleFade,
         }, h('canvas', { ref: canvasRef, 'aria-hidden': true })),
       )
     }
@@ -419,6 +638,7 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
     return {
       inject: ['slots'],
       apply(ctx) {
+        ctx.effect(() => watchRunningLabel(), 'zzz-spine: running-turn label')
         ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({
           name: 'conversation.input.overlay',
           id: 'zzz-spine',
