@@ -222,6 +222,19 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
     const RUNNING_LABEL = { from: '深度求索中', to: '罗塞塔数据解算中' }
     const SHIMMER_TEXT = 'data-shimmer-text'
 
+    // Relabelling runs again on every mutation it causes, so it only converges
+    // once the rewritten text no longer contains `from`. When `to` contains
+    // `from` (or `from` is empty), every pass matches its own output: the
+    // observer keeps re-queueing itself as a microtask, the queue never drains,
+    // and the browser never gets to paint — the tab locks up instead of merely
+    // dropping frames. That is a configuration mistake, so it fails here, at
+    // load time, rather than the first time a turn runs.
+    if (RUNNING_LABEL.from === '' || RUNNING_LABEL.to.includes(RUNNING_LABEL.from)) {
+      throw new Error(
+        'RUNNING_LABEL does not converge: `from` must be non-empty and `to` must not contain it',
+      )
+    }
+
     /** Rewrite every copy of the label inside one running row. */
     function relabel(root) {
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
