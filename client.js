@@ -41,6 +41,22 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
     const FRAME_INTERVAL = 1000 / 20
 
     /**
+     * Canvas2D cannot fill a skinned mesh in one call: it clips every triangle
+     * and blits the atlas page through an affine map. Those clips are
+     * antialiased, so at every shared edge the two neighbours each cover only
+     * part of the pixel — the edge comes out at ~75% alpha instead of 100%.
+     * Over the dark card that deficit reads as a wireframe of hairlines across
+     * the whole figure, and a phone whose DPR is higher than the backing store
+     * cap upsamples the canvas, thickening them into thread-like lines.
+     *
+     * Growing each triangle's clip by this many device pixels lets the
+     * neighbours overlap so the shared edge reaches full alpha. Each triangle
+     * blits only its own atlas rect, so the grown border can only repeat the
+     * sprite's own pixels and never samples the sprite packed next to it.
+     */
+    const SEAM_OVERLAP = 0.6
+
+    /**
      * The corner stage is mostly empty, so the pointer router tests the
      * figure's painted pixels instead of letting the whole rectangle swallow
      * presses. The mask is a coarse 45×60 alpha grid — 4×4 CSS px per cell —
@@ -212,6 +228,530 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
       return best
     }
 
+    const QUAD_TRIANGLES = [0, 1, 2, 2, 3, 0]
+
+    /**
+     * Paint one pose of a skinned skeleton.
+     *
+     * This replaces `spine.SkeletonRenderer`'s `triangleRendering` path: the
+     * drawing is the same run of clipped, affine-mapped atlas blits, but each
+     * clip is grown by `overlap` world units and sourced from the attachment's
+     * own atlas rect. Shared edges then overlap instead of leaving the
+     * translucent hairline described at `SEAM_OVERLAP`, and the grown border
+     * can only repeat the sprite's own pixels.
+     *
+     * `overlap` is `SEAM_OVERLAP` converted to world units, so the overlap is a
+     * constant size in device pixels at any backing-store scale.
+     */
+    function drawSkeleton(context, skeleton, overlap) {
+      let vertices = new Float32Array(0)
+      for (const slot of skeleton.drawOrder) {
+        const attachment = slot.getAttachment()
+        if (attachment === null) continue
+        const isRegion = attachment instanceof spine.RegionAttachment
+        const isMesh = !isRegion && attachment instanceof spine.MeshAttachment
+        if (!isRegion && !isMesh) continue
+        const region = attachment.region
+        if (region === null || region === undefined) continue
+        if (region.texture === null || region.texture === undefined) continue
+        const image = region.texture.getImage()
+        if (image === null || image === undefined) continue
+        const length = isRegion ? 8 : attachment.worldVerticesLength
+        if (!(length > 0)) continue
+        if (vertices.length < length) vertices = new Float32Array(length)
+        if (isRegion) attachment.computeWorldVertices(slot, vertices, 0, 2)
+        else attachment.computeWorldVertices(slot, 0, length, vertices, 0, 2)
+        const triangles = isRegion ? QUAD_TRIANGLES : attachment.triangles
+        if (triangles === null || triangles === undefined) continue
+        const uvs = attachment.uvs
+        if (uvs === null || uvs === undefined) continue
+        const attachmentColor = attachment.color
+        const alpha = skeleton.color.a * slot.color.a *
+          (attachmentColor === undefined ? 1 : attachmentColor.a)
+        if (!(alpha > 0)) continue
+        // The atlas stores a `rotate: 90` region transposed: the atlas text's
+        // width/height describe the sprite, while the page holds height×width.
+        const rotated = region.degrees === 90
+        const sourceWidth = rotated ? region.height : region.width
+        const sourceHeight = rotated ? region.width : region.height
+        const pageWidth = image.width - 1
+        const pageHeight = image.height - 1
+        context.globalAlpha = alpha
+        for (let index = 0; index < triangles.length; index += 3) {
+          const a = triangles[index] * 2
+          const b = triangles[index + 1] * 2
+          const c = triangles[index + 2] * 2
+          const x1 = vertices[a]
+          const y1 = vertices[a + 1]
+          const x2 = vertices[b]
+          const y2 = vertices[b + 1]
+          const x3 = vertices[c]
+          const y3 = vertices[c + 1]
+          // Grow the clip away from the centroid: every edge moves outward by
+          // `overlap`, so neighbours overlap instead of meeting at half alpha.
+          const centerX = (x1 + x2 + x3) / 3
+          const centerY = (y1 + y2 + y3) / 3
+          let reach = Math.hypot(x1 - centerX, y1 - centerY) || 1
+          const p1x = x1 + ((x1 - centerX) / reach) * overlap
+          const p1y = y1 + ((y1 - centerY) / reach) * overlap
+          reach = Math.hypot(x2 - centerX, y2 - centerY) || 1
+          const p2x = x2 + ((x2 - centerX) / reach) * overlap
+          const p2y = y2 + ((y2 - centerY) / reach) * overlap
+          reach = Math.hypot(x3 - centerX, y3 - centerY) || 1
+          const p3x = x3 + ((x3 - centerX) / reach) * overlap
+          const p3y = y3 + ((y3 - centerY) / reach) * overlap
+          const tu1 = uvs[a] * pageWidth
+          const tv1 = uvs[a + 1] * pageHeight
+          const tu2 = uvs[b] * pageWidth
+          const tv2 = uvs[b + 1] * pageHeight
+          const tu3 = uvs[c] * pageWidth
+          const tv3 = uvs[c + 1] * pageHeight
+          context.beginPath()
+          context.moveTo(p1x, p1y)
+          context.lineTo(p2x, p2y)
+          context.lineTo(p3x, p3y)
+          context.closePath()
+          // Affine map from the atlas page onto this triangle. Paths are
+          // rasterised where they are built, so the clip above keeps its
+          // canvas-space shape while the blit is transformed.
+          const e1x = p2x - p1x
+          const e1y = p2y - p1y
+          const e2x = p3x - p1x
+          const e2y = p3y - p1y
+          const du2 = tu2 - tu1
+          const dv2 = tv2 - tv1
+          const du3 = tu3 - tu1
+          const dv3 = tv3 - tv1
+          let det = du2 * dv3 - du3 * dv2
+          if (det === 0) continue
+          det = 1 / det
+          const ta = (dv3 * e1x - dv2 * e2x) * det
+          const tb = (dv3 * e1y - dv2 * e2y) * det
+          const tc = (du2 * e2x - du3 * e1x) * det
+          const td = (du2 * e2y - du3 * e1y) * det
+          context.save()
+          context.transform(ta, tb, tc, td,
+            p1x - ta * tu1 - tc * tv1, p1y - tb * tu1 - td * tv1)
+          context.clip()
+          context.drawImage(image,
+            region.x, region.y, sourceWidth, sourceHeight,
+            region.x, region.y, sourceWidth, sourceHeight)
+          context.restore()
+        }
+      }
+      context.globalAlpha = 1
+    }
+    /* ---------------------------------------------------------------------
+     * WebGL figure
+     *
+     * Canvas2D has exactly one way to fill a textured triangle: clip to it and
+     * blit the atlas through an affine map. Clip edges are antialiased, so every
+     * shared edge comes out translucent; growing the clip (`SEAM_OVERLAP`) hides
+     * most of that, but the seam is only ever covered, never removed, and how
+     * much survives depends on the browser's clip rasteriser. That is why Spine
+     * calls its canvas mesh path experimental and points at the WebGL backend.
+     *
+     * On the GPU the same triangles are filled by one rasteriser with one fill
+     * rule: a pixel inside the mesh is covered exactly once, so shared edges
+     * cannot seam. This is a small purpose-built renderer rather than the full
+     * spine-webgl runtime: the canvas runtime already poses the skeleton, so all
+     * that is left is one batched draw call.
+     *
+     * Atlas bleeding is handled in the shader. Spine's UVs sit on texel edges,
+     * so LINEAR sampling at a sprite's border would reach into the sprite packed
+     * next to it — this page has no padding at all. Clamping each sample to the
+     * attachment's own rect, half a texel in, keeps every sample inside the
+     * sprite.
+     * ------------------------------------------------------------------- */
+
+    const WEBGL_VERTEX_SHADER = [
+      'attribute vec2 aPosition;',
+      'attribute vec2 aUV;',
+      'attribute vec4 aBounds;',
+      'attribute float aAlpha;',
+      'uniform vec2 uScale;',
+      'uniform vec2 uOffset;',
+      'uniform vec2 uHalf;',
+      'varying vec2 vUV;',
+      'varying vec4 vBounds;',
+      'varying float vAlpha;',
+      'void main() {',
+      '  vec2 px = aPosition * uScale + uOffset;',
+      '  gl_Position = vec4(px.x / uHalf.x - 1.0, 1.0 - px.y / uHalf.y, 0.0, 1.0);',
+      '  vUV = aUV;',
+      '  vBounds = aBounds;',
+      '  vAlpha = aAlpha;',
+      '}',
+    ].join('\n')
+
+    const WEBGL_FRAGMENT_SHADER = [
+      '#ifdef GL_FRAGMENT_PRECISION_HIGH',
+      'precision highp float;',
+      '#else',
+      'precision mediump float;',
+      '#endif',
+      'uniform sampler2D uTexture;',
+      'varying vec2 vUV;',
+      'varying vec4 vBounds;',
+      'varying float vAlpha;',
+      'void main() {',
+      '  // The atlas is uploaded premultiplied (see UNPACK_PREMULTIPLY_ALPHA_WEBGL),',
+      '  // so the texel already carries rgb*alpha. Multiplying again would be wrong;',
+      '  // and uploading straight alpha makes LINEAR sampling pull transparent-black',
+      '  // padding into every sprite edge (the dark fringe around all textures).',
+      '  vec4 texel = texture2D(uTexture, clamp(vUV, vBounds.xy, vBounds.zw));',
+      '  gl_FragColor = texel * vAlpha;',
+      '}',
+    ].join('\n')
+
+    function compileShader(gl, type, source) {
+      const shader = gl.createShader(type)
+      gl.shaderSource(shader, source)
+      gl.compileShader(shader)
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        throw new Error('shader: ' + gl.getShaderInfoLog(shader))
+      }
+      return shader
+    }
+
+    /** Every attachment name this slot can show while the track plays. */
+    function slotAttachmentNames(skin, slotIndex) {
+      if (skin === null || skin === undefined) return []
+      const bag = skin.attachments
+      if (bag === null || bag === undefined) return []
+      const entry = typeof bag.get === 'function' ? bag.get(slotIndex) : bag[slotIndex]
+      if (entry === null || entry === undefined) return []
+      if (typeof entry.keys === 'function') return [...entry.keys()]
+      return Object.keys(entry)
+    }
+
+    /**
+     * One batched draw call for the whole figure, plus a tiny framebuffer used
+     * to rebuild the click-through mask without reading the visible canvas
+     * (a WebGL canvas cannot be read back with `getImageData`).
+     */
+    function createWebGlFigure(canvas, image, fit) {
+      const gl = canvas.getContext('webgl', {
+        alpha: true,
+        premultipliedAlpha: true,
+        antialias: false,
+        depth: false,
+        stencil: false,
+        preserveDrawingBuffer: false,
+      })
+      if (gl === null) throw new Error('no webgl context')
+
+      const pageWidth = image.width
+      const pageHeight = image.height
+      let program = null
+      let attributes = null
+      let uniforms = null
+      let texture = null
+      let buffers = null
+      let layout = null
+      let mask = null
+      let restored = null
+      let lost = false
+      let skeletonRef = null
+      let skinRef = null
+      let pixelRatioRef = 1
+      const scratch = { vertices: new Float32Array(0) }
+
+      const createResources = () => {
+        program = gl.createProgram()
+        gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, WEBGL_VERTEX_SHADER))
+        gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, WEBGL_FRAGMENT_SHADER))
+        gl.linkProgram(program)
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+          throw new Error('program: ' + gl.getProgramInfoLog(program))
+        }
+        attributes = {
+          position: gl.getAttribLocation(program, 'aPosition'),
+          uv: gl.getAttribLocation(program, 'aUV'),
+          bounds: gl.getAttribLocation(program, 'aBounds'),
+          alpha: gl.getAttribLocation(program, 'aAlpha'),
+        }
+        uniforms = {
+          scale: gl.getUniformLocation(program, 'uScale'),
+          offset: gl.getUniformLocation(program, 'uOffset'),
+          half: gl.getUniformLocation(program, 'uHalf'),
+          texture: gl.getUniformLocation(program, 'uTexture'),
+        }
+        texture = gl.createTexture()
+        gl.bindTexture(gl.TEXTURE_2D, texture)
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        mask = null
+        if (skeletonRef !== null) buildBuffers(skeletonRef, skinRef)
+      }
+
+      /**
+       * One block of vertices per (slot, candidate attachment), in slot order.
+       * A slot can switch attachments while the track plays (the idle track
+       * toggles the eye expressions 42 times), so every candidate the skin
+       * offers for that slot is reserved; each frame the inactive ones are
+       * collapsed to zero area and drawn as nothing.
+       */
+      const buildBuffers = (skeleton, skin) => {
+        const slots = skeleton.slots
+        const entries = []
+        let vertexTotal = 0
+        let indexTotal = 0
+        for (let slotIndex = 0; slotIndex < slots.length; slotIndex++) {
+          const slotData = slots[slotIndex]
+          const candidates = slotAttachmentNames(skin, slotIndex)
+          if (slotData.attachment !== undefined && slotData.attachment !== null &&
+            candidates.indexOf(slotData.attachment) < 0) {
+            candidates.push(slotData.attachment)
+          }
+          for (const name of candidates) {
+            const attachment = skin.getAttachment(slotIndex, name)
+            if (attachment === null || attachment === undefined) continue
+            const isRegion = attachment instanceof spine.RegionAttachment
+            const isMesh = !isRegion && attachment instanceof spine.MeshAttachment
+            if (!isRegion && !isMesh) continue
+            const region = attachment.region
+            if (region === null || region === undefined) continue
+            if (region.texture === null || region.texture === undefined) continue
+            const uvs = attachment.uvs
+            if (uvs === null || uvs === undefined) continue
+            const count = isRegion ? 4 : attachment.worldVerticesLength / 2
+            if (!(count > 0)) continue
+            const triangles = isRegion ? QUAD_TRIANGLES : attachment.triangles
+            if (triangles === null || triangles === undefined) continue
+            // Rotated atlas regions are stored transposed: the atlas text's
+            // width/height describe the sprite, the page holds height×width.
+            const rotated = region.degrees === 90
+            const storedWidth = rotated ? region.height : region.width
+            const storedHeight = rotated ? region.width : region.height
+            let minU = (region.x + 0.5) / pageWidth
+            let maxU = (region.x + storedWidth - 0.5) / pageWidth
+            let minV = (region.y + 0.5) / pageHeight
+            let maxV = (region.y + storedHeight - 0.5) / pageHeight
+            if (maxU < minU) { minU = maxU = region.x / pageWidth }
+            if (maxV < minV) { minV = maxV = region.y / pageHeight }
+            entries.push({
+              slotIndex,
+              name,
+              attachment,
+              first: vertexTotal,
+              count,
+              uvs,
+              minU,
+              maxU,
+              minV,
+              maxV,
+              triangles,
+            })
+            vertexTotal += count
+            indexTotal += triangles.length
+          }
+        }
+
+        const positions = new Float32Array(vertexTotal * 2)
+        const uvs = new Float32Array(vertexTotal * 2)
+        const bounds = new Float32Array(vertexTotal * 4)
+        const alphas = new Float32Array(vertexTotal)
+        const indices = new Uint16Array(indexTotal)
+        let indexOffset = 0
+        for (const entry of entries) {
+          for (let vertex = 0; vertex < entry.count; vertex++) {
+            const target = (entry.first + vertex) * 2
+            uvs[target] = entry.uvs[vertex * 2]
+            uvs[target + 1] = entry.uvs[vertex * 2 + 1]
+            const boundTarget = (entry.first + vertex) * 4
+            bounds[boundTarget] = entry.minU
+            bounds[boundTarget + 1] = entry.minV
+            bounds[boundTarget + 2] = entry.maxU
+            bounds[boundTarget + 3] = entry.maxV
+          }
+          for (let index = 0; index < entry.triangles.length; index++) {
+            indices[indexOffset + index] = entry.first + entry.triangles[index]
+          }
+          indexOffset += entry.triangles.length
+        }
+
+        const makeBuffer = (target, data, usage) => {
+          const buffer = gl.createBuffer()
+          gl.bindBuffer(target, buffer)
+          gl.bufferData(target, data, usage)
+          return buffer
+        }
+        buffers = {
+          positions: makeBuffer(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW),
+          uvs: makeBuffer(gl.ARRAY_BUFFER, uvs, gl.STATIC_DRAW),
+          bounds: makeBuffer(gl.ARRAY_BUFFER, bounds, gl.STATIC_DRAW),
+          alphas: makeBuffer(gl.ARRAY_BUFFER, alphas, gl.DYNAMIC_DRAW),
+          indices: makeBuffer(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW),
+        }
+        layout = {
+          entries,
+          byKey: new Map(entries.map((entry) => [entry.slotIndex + ':' + entry.name, entry])),
+          positions,
+          alphas,
+          indexCount: indexTotal,
+        }
+      }
+
+      const ensureMask = () => {
+        if (mask !== null) return mask
+        const maskTexture = gl.createTexture()
+        gl.bindTexture(gl.TEXTURE_2D, maskTexture)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, MASK_WIDTH, MASK_HEIGHT, 0,
+          gl.RGBA, gl.UNSIGNED_BYTE, null)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        const framebuffer = gl.createFramebuffer()
+        gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer)
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, maskTexture, 0)
+        const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+        if (!complete) return null
+        mask = {
+          framebuffer,
+          pixels: new Uint8Array(MASK_WIDTH * MASK_HEIGHT * 4),
+          cells: new Uint8Array(MASK_WIDTH * MASK_HEIGHT),
+        }
+        return mask
+      }
+
+      const draw = (target, pixelRatio, ratioX, ratioY, halfWidth, halfHeight) => {
+        if (buffers === null || layout === null) return
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target)
+        gl.viewport(0, 0, Math.round(halfWidth * 2), Math.round(halfHeight * 2))
+        gl.clearColor(0, 0, 0, 0)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+        gl.useProgram(program)
+        gl.enable(gl.BLEND)
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, texture)
+        gl.uniform1i(uniforms.texture, 0)
+        gl.uniform2f(uniforms.scale, fit.a * pixelRatio * ratioX, -fit.a * pixelRatio * ratioY)
+        gl.uniform2f(uniforms.offset, fit.e * pixelRatio * ratioX, fit.f * pixelRatio * ratioY)
+        gl.uniform2f(uniforms.half, halfWidth, halfHeight)
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.positions)
+        gl.enableVertexAttribArray(attributes.position)
+        gl.vertexAttribPointer(attributes.position, 2, gl.FLOAT, false, 0, 0)
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.uvs)
+        gl.enableVertexAttribArray(attributes.uv)
+        gl.vertexAttribPointer(attributes.uv, 2, gl.FLOAT, false, 0, 0)
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.bounds)
+        gl.enableVertexAttribArray(attributes.bounds)
+        gl.vertexAttribPointer(attributes.bounds, 4, gl.FLOAT, false, 0, 0)
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.alphas)
+        gl.enableVertexAttribArray(attributes.alpha)
+        gl.vertexAttribPointer(attributes.alpha, 1, gl.FLOAT, false, 0, 0)
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.indices)
+        gl.drawElements(gl.TRIANGLES, layout.indexCount, gl.UNSIGNED_SHORT, 0)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+      }
+
+      const paint = (skeleton, pixelRatio) => {
+        if (lost || buffers === null || layout === null || fit === null) return
+        const positions = layout.positions
+        const alphas = layout.alphas
+        positions.fill(0)
+        alphas.fill(0)
+        for (const slot of skeleton.drawOrder) {
+          const attachment = slot.getAttachment()
+          if (attachment === null) continue
+          const entry = layout.byKey.get(slot.data.index + ':' + attachment.name)
+          if (entry === undefined) continue
+          const length = entry.count * 2
+          if (scratch.vertices.length < length) scratch.vertices = new Float32Array(length * 2)
+          if (entry.attachment instanceof spine.RegionAttachment) {
+            attachment.computeWorldVertices(slot, scratch.vertices, 0, 2)
+          } else {
+            attachment.computeWorldVertices(slot, 0, length, scratch.vertices, 0, 2)
+          }
+          positions.set(scratch.vertices.subarray(0, length), entry.first * 2)
+          const alpha = skeleton.color.a * slot.color.a * attachment.color.a
+          alphas.fill(alpha, entry.first, entry.first + entry.count)
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.positions)
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, positions)
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.alphas)
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, alphas)
+        pixelRatioRef = pixelRatio
+        draw(null, pixelRatio, 1, 1, canvas.width / 2, canvas.height / 2)
+      }
+
+      /** Rebuild the 45×60 hit mask from a matching off-screen render. */
+      const readMask = (pixelRatio) => {
+        if (lost || buffers === null || layout === null || fit === null) return null
+        const target = ensureMask()
+        if (target === null) return null
+        draw(target.framebuffer, pixelRatio, MASK_WIDTH / canvas.width, MASK_HEIGHT / canvas.height,
+          MASK_WIDTH / 2, MASK_HEIGHT / 2)
+        // `draw` unbinds when it is done, and readPixels reads whatever framebuffer
+        // is bound — so re-bind the off-screen target first.
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer)
+        gl.readPixels(0, 0, MASK_WIDTH, MASK_HEIGHT, gl.RGBA, gl.UNSIGNED_BYTE, target.pixels)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+        let filled = 0
+        for (let row = 0; row < MASK_HEIGHT; row++) {
+          const source = (MASK_HEIGHT - 1 - row) * MASK_WIDTH
+          const destination = row * MASK_WIDTH
+          for (let column = 0; column < MASK_WIDTH; column++) {
+            // readPixels starts at the bottom row; the stage's mask is top-down.
+            const alpha = target.pixels[(source + column) * 4 + 3]
+            const value = alpha >= MASK_THRESHOLD ? 1 : 0
+            target.cells[destination + column] = value
+            filled += value
+          }
+        }
+        return { cells: target.cells, filled }
+      }
+
+      const onContextLost = (event) => {
+        event.preventDefault()
+        lost = true
+        buffers = null
+        layout = null
+        mask = null
+        program = null
+        texture = null
+      }
+
+      const onContextRestored = () => {
+        lost = false
+        try {
+          createResources()
+        } catch {
+          return
+        }
+        if (restored !== null) restored()
+      }
+
+      canvas.addEventListener('webglcontextlost', onContextLost)
+      canvas.addEventListener('webglcontextrestored', onContextRestored)
+      createResources()
+
+      return {
+        build(skeleton, skin) {
+          skeletonRef = skeleton
+          skinRef = skin
+          buildBuffers(skeleton, skin)
+        },
+        paint,
+        readMask,
+        dispose() {
+          canvas.removeEventListener('webglcontextlost', onContextLost)
+          canvas.removeEventListener('webglcontextrestored', onContextRestored)
+        },
+        get lost() { return lost },
+        set onRestore(fn) { restored = fn },
+        get pixelRatio() { return pixelRatioRef },
+      }
+    }
+
     async function build(dir) {
       const dirUrl = new URL('spine/' + dir + '/', new URL(ASSET_ROOT, document.baseURI))
       const [atlasText, json] = await Promise.all([
@@ -222,8 +762,10 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
       // The atlas text already names its pages; re-parsing it would be a second,
       // more brittle copy of that truth.
       const pages = atlas.pages.map((page) => page.name)
+      const textures = new Map()
       await Promise.all(pages.map(async (page) => {
         const texture = await loadTexture(new URL(page, dirUrl).href)
+        textures.set(page, texture)
         for (const atlasPage of atlas.pages) {
           if (atlasPage.name === page) atlasPage.setTexture(new spine.CanvasTexture(texture))
         }
@@ -240,6 +782,11 @@ return { "AlphaTimeline": at, "Animation": Fe, "AnimationState": Us, "AnimationS
         // the fallback for skeletons without declared bounds — and it is only
         // measured when that fallback is actually needed (7.5 ms otherwise).
         fit: framing(declaredBox(skeletonData) ?? measure(skeletonData, animation)),
+        // The WebGL path uploads the atlas page itself, so it needs the decoded
+        // image; a multi-page atlas is left to the Canvas2D fallback, which can
+        // draw any page per attachment.
+        pageCount: pages.length,
+        image: pages.length === 1 ? textures.get(pages[0]) : undefined,
       }
     }
 
@@ -632,6 +1179,7 @@ html.zzz-spine-pointer body {
       React.useEffect(() => {
         let disposed = false
         let rig = null
+        let glFigure = null
         let frame = 0
         let drawn = 0
         let intersecting = true
@@ -718,8 +1266,9 @@ html.zzz-spine-pointer body {
           if (disposed) return
           if (canvas === null) return
           const skeleton = new spine.Skeleton(data.skeletonData)
-          const skin = pickSkin(skeleton, data.skeletonData)
-          if (skin !== null) skeleton.setSkinByName(skin)
+          const skinName = pickSkin(skeleton, data.skeletonData)
+          const skin = skinName === null ? null : data.skeletonData.findSkin(skinName)
+          if (skinName !== null) skeleton.setSkinByName(skinName)
           skeleton.setToSetupPose()
           const state = new spine.AnimationState(new spine.AnimationStateData(data.skeletonData))
           state.setAnimation(0, data.animation, true)
@@ -727,17 +1276,33 @@ html.zzz-spine-pointer body {
           state.apply(skeleton)
           // 4.3 runtimes no longer transform bones inside apply().
           skeleton.updateWorldTransform(spine.Physics.update)
-          const context = canvas.getContext('2d')
-          const renderer = new spine.SkeletonRenderer(context)
-          renderer.triangleRendering = true
           const fit = data.fit
           let pixelRatio = 1
+
+          // WebGL first: the GPU fills neighbouring triangles with one fill rule,
+          // so the mesh cannot show the Canvas2D clip seams at all. Without a
+          // WebGL context (or on a multi-page atlas) the seamed-but-overlapped
+          // Canvas2D path takes over.
+          let context = null
+          if (fit !== null && data.pageCount === 1 && data.image !== undefined) {
+            try {
+              glFigure = createWebGlFigure(canvas, data.image, fit)
+              glFigure.build(skeleton, skin)
+            } catch {
+              glFigure = null
+            }
+          }
+          if (glFigure === null) context = canvas.getContext('2d')
 
           // The backing store follows the CSS box. Reading `clientWidth` inside
           // the loop would force a layout on every frame; a ResizeObserver is
           // the one place that has to know instead.
           const resizeCanvas = () => {
-            pixelRatio = Math.min(window.devicePixelRatio || 1, 2)
+            // A phone's 3x screen would otherwise upsample a 2x backing store and
+            // smear the figure; the cost is per triangle, not per pixel, so native
+            // resolution on a 3x device is nearly free. Cap it so an exotic 4x
+            // screen does not pay for fill that nobody can see at 180x240.
+            pixelRatio = Math.min(window.devicePixelRatio || 1, 3)
             const width = Math.round((canvas.clientWidth || STAGE_WIDTH) * pixelRatio)
             const height = Math.round((canvas.clientHeight || STAGE_HEIGHT) * pixelRatio)
             if (canvas.width !== width || canvas.height !== height) {
@@ -746,17 +1311,29 @@ html.zzz-spine-pointer body {
             }
           }
 
-          // The hit mask is rebuilt from what was just painted: downsample the
-          // backing store to 45×60, read its alpha, and keep one bit per cell.
-          // Starting at MASK_FRAMES - 1 makes the first paint below refresh it.
-          const maskCanvas = document.createElement('canvas')
-          maskCanvas.width = MASK_WIDTH
-          maskCanvas.height = MASK_HEIGHT
-          const maskContext = maskCanvas.getContext('2d', { willReadFrequently: true })
+          // The hit mask is rebuilt from what was just painted: a WebGL figure
+          // renders a 45×60 framebuffer and reads it back; the Canvas2D fallback
+          // downsamples the visible canvas. Starting at MASK_FRAMES - 1 makes the
+          // first paint below refresh it.
+          let maskCanvas = null
+          let maskContext = null
           const cells = new Uint8Array(MASK_WIDTH * MASK_HEIGHT)
           let maskFrame = MASK_FRAMES - 1
+          if (glFigure === null) {
+            maskCanvas = document.createElement('canvas')
+            maskCanvas.width = MASK_WIDTH
+            maskCanvas.height = MASK_HEIGHT
+            maskContext = maskCanvas.getContext('2d', { willReadFrequently: true })
+          }
 
           const refreshMask = () => {
+            if (glFigure !== null) {
+              const result = glFigure.readMask(pixelRatio)
+              maskRef.current = result === null
+                ? null
+                : { width: MASK_WIDTH, height: MASK_HEIGHT, cells: result.cells }
+              return
+            }
             if (maskContext === null) return
             try {
               maskContext.clearRect(0, 0, MASK_WIDTH, MASK_HEIGHT)
@@ -773,17 +1350,25 @@ html.zzz-spine-pointer body {
             }
           }
           const paint = (delta) => {
-            context.setTransform(1, 0, 0, 1, 0, 0)
-            context.clearRect(0, 0, canvas.width, canvas.height)
-            if (fit === null) return
-            context.setTransform(
-              fit.a * pixelRatio, 0, 0, -fit.a * pixelRatio,
-              fit.e * pixelRatio, fit.f * pixelRatio,
-            )
-            state.update(delta)
-            state.apply(skeleton)
-            skeleton.updateWorldTransform(spine.Physics.update)
-            renderer.draw(skeleton)
+            if (glFigure !== null) {
+              state.update(delta)
+              state.apply(skeleton)
+              skeleton.updateWorldTransform(spine.Physics.update)
+              glFigure.paint(skeleton, pixelRatio)
+            } else {
+              if (context === null) return
+              context.setTransform(1, 0, 0, 1, 0, 0)
+              context.clearRect(0, 0, canvas.width, canvas.height)
+              if (fit === null) return
+              context.setTransform(
+                fit.a * pixelRatio, 0, 0, -fit.a * pixelRatio,
+                fit.e * pixelRatio, fit.f * pixelRatio,
+              )
+              state.update(delta)
+              state.apply(skeleton)
+              skeleton.updateWorldTransform(spine.Physics.update)
+              drawSkeleton(context, skeleton, SEAM_OVERLAP / (fit.a * pixelRatio))
+            }
             if (++maskFrame >= MASK_FRAMES) {
               maskFrame = 0
               refreshMask()
@@ -797,6 +1382,15 @@ html.zzz-spine-pointer body {
               // Force the paint that follows to rebuild the mask at the new size.
               maskFrame = MASK_FRAMES - 1
             },
+          }
+          if (glFigure !== null) {
+            // A lost context comes back empty; repaint the current pose so the
+            // figure does not stay blank until the next tick (which is paused
+            // whenever the figure is faded).
+            glFigure.onRestore = () => {
+              if (disposed) return
+              rig.paint(0)
+            }
           }
           resizeCanvas()
           // Paint one frame synchronously: a background tab never runs
@@ -819,6 +1413,10 @@ html.zzz-spine-pointer body {
           }
           syncRef.current = null
           maskRef.current = null
+          if (glFigure !== null) {
+            glFigure.dispose()
+            glFigure = null
+          }
           rig = null
         }
       }, [character.dir])
@@ -837,7 +1435,9 @@ html.zzz-spine-pointer body {
         let armed = false
         let guardUntil = 0
         let timer = 0
-
+        // Remember what pressed last: a touch has no hover, so the lock chip has
+        // to be retired by the router itself once it has been used.
+        let lastPointerType = ''
         const isInside = (rect, x, y) =>
           x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
 
@@ -923,6 +1523,7 @@ html.zzz-spine-pointer body {
           // Only a primary press belongs to the figure; right-click and
           // middle-click stay with the page (context menu, autoscroll).
           if (event.button !== 0) return
+          lastPointerType = event.pointerType
           // A new press owns whatever click follows it; a press that was
           // dragged away must not swallow this one.
           disarm()
@@ -937,12 +1538,17 @@ html.zzz-spine-pointer body {
             // unlocked figure; presses inside it go to the page unchanged, so
             // controls behind the figure can be used one after another.
             const inside = isInside(rect, x, y)
-            if (!lockedRef.current && !inside) {
+            if (!inside) {
+              // Any press off the figure puts the chip away right now; an
+              // unlocked figure also comes back. A locked one stays ghosted, but
+              // the end of the interaction is still the moment to hide the chip
+              // rather than leave it up for the rest of the touch flash window.
+              clearFlash()
               setLockShown(false)
-              restore()
+              if (!lockedRef.current) restore()
               return
             }
-            if (event.pointerType !== 'mouse' && (lockedRef.current || inside)) flashLock()
+            if (event.pointerType !== 'mouse') flashLock()
             if (inside && performance.now() < guardUntil) {
               // The second click of a double click would otherwise land on the
               // control the fade just revealed.
@@ -995,13 +1601,19 @@ html.zzz-spine-pointer body {
         }
 
         const onClick = (event) => {
-          if (!armed) return
-          // The lock is the one control that must always work, even if a press
-          // from just before is still being swallowed.
           if (fromLockButton(event)) {
+            // The lock chip has just done its job. Hiding it here is what keeps a
+            // phone from showing a dead button for the remaining seconds of the
+            // 4 s touch flash; a mouse keeps it because the pointer still rests
+            // on it, and keyboard activation keeps it through :focus-visible.
             disarm()
+            if (event.detail !== 0 && lastPointerType !== 'mouse') {
+              clearFlash()
+              setLockShown(false)
+            }
             return
           }
+          if (!armed) return
           // Keyboard activation has no pointer press behind it; never eat it.
           if (event.detail === 0) {
             disarm()

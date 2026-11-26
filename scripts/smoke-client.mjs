@@ -10,6 +10,15 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const FILE = path.join(ROOT, 'client.js')
 const code = fs.readFileSync(FILE, 'utf8')
 
+// A doc comment that lost its `*/` still parses: the next declaration just
+// becomes comment text. That once swallowed FRAME_INTERVAL, which froze the idle
+// loop without any error, so check the cadence declaration is real code.
+const TEMPLATE = fs.readFileSync(path.join(ROOT, 'client.template.js'), 'utf8')
+const cadence = TEMPLATE.indexOf('const FRAME_INTERVAL')
+if (cadence < 0) throw new Error('FRAME_INTERVAL disappeared from the template')
+if (!TEMPLATE.slice(0, cadence).trimEnd().endsWith('*/')) {
+  throw new Error('FRAME_INTERVAL sits inside a comment')
+}
 const node = (type, props, children) => ({ type, props: props ?? {}, children })
 
 /** Depth-first search for a rendered node by one of its class names. */
@@ -135,6 +144,22 @@ if (typeof css !== 'string') throw new Error('style sheet was not emitted as a s
 for (const rule of ['zzz-spine-lock', 'data-lock-visible', 'zzz-spine-pointer', '[data-hover] canvas']) {
   if (!css.includes(rule)) throw new Error('style sheet is missing ' + rule)
 }
+// The figure must ship both renderers: the WebGL one (seam-free by construction)
+// and the Canvas2D fallback for a page without a WebGL context. Losing either
+// silently would bring the hairline wireframe back on real phones, so fail loudly.
+for (const marker of [
+  'createWebGlFigure',
+  'webglcontextlost',
+  'drawSkeleton',
+  'SEAM_OVERLAP',
+  'region.degrees === 90',
+]) {
+  if (!code.includes(marker)) throw new Error('renderer marker is missing: ' + marker)
+}
+if (code.includes('new spine.SkeletonRenderer')) {
+  throw new Error('the seamed SkeletonRenderer path is back')
+}
+console.log('ok: webgl renderer + canvas2d fallback bundled')
 
 const stageElement = children[1]
 if (stageElement === undefined || typeof stageElement.type !== 'function') {
